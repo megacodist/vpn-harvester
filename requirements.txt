@@ -1,0 +1,8 @@
+# For scheduling the job
+schedule
+
+# For loading environment variables from a .env file for local development
+python-dotenv
+
+requests
+jinja2

@@ -1,0 +1,70 @@
+{#
+    This Jinaja2 template must receive the following variables:
+    - `data`: The CSV data to be displayed in the table.
+    - `now`: The current timestamp for the footer.
+#}
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Dynamic Table using Jinja2">
+    <title>Dynamic Table</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            margin: 20px;
+            color: #333;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Dynamic Table</h1>
+    </header>
+    
+    <main>
+        <table>
+            <thead>
+                <tr>
+                    {% for header in data[0] %}
+                    <th>{{ header }}</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in data[1:] %}
+                <tr>
+                    {% for cell in row %}
+                    <td>{{ cell }}</td>
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </main>
+    
+    <footer>
+        <p>Generated on {{ now.strftime('%Y-%m-%d %H:%M:%S') }}</p>
+    </footer>
+</body>
+</html>
