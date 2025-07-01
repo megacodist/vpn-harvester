@@ -1,0 +1,48 @@
+CLASS VpnGateCsv :=
+    CONST N_COLS AS Integer,
+    header AS Tuple<N_COLS TIMES String>,
+    data AS List<Tuple<N_COLS TIMES String>>,
+
+    METHOD NEW(n_col AS Integer) :=
+        this.N_COLS <- n_col
+    ENDMETHOD
+ENDCLASS
+
+
+FUNCTION ParseVpnGateCsv(text AS String) -> VpnGateCsv :=
+    lines AS Tuple<String...> <- DO {{remove leading and trailing
+        whitespace from @text & split it around newline characters}}
+    // Removing possible comments (starting with *)...
+    startIdx AS Index <- FIRST + 1 IF {{@lines[FIRST] starts with '*'}}
+        ELSE FIRST
+    stopIdx AS Index <- LAST - 1 IF {{@lines[LAST] starts with '*'}} 
+        ELSE LAST
+    lines <- lines[startIdx .. stopIdx]
+    // Parsing the first line as header...
+    linesIter AS Iterator<String> <- ITERATOR OF lines
+    IF linesIter EXHAUSTED THEN
+        RAISE {{header error: no header was found}}
+    ENDIF
+    line <- NEXT linesIter
+    header AS Tuple<String...> <- DO {{split @line around ','}}
+    nCols AS Integer <- LENGTH OF header
+    vpnGateCsv AS VpnGateCsv <- NEW VpnGateCsv(nCols)
+    vpnGateCsv.header <- header
+    // Parsing the rest of lines...
+    nDataLine AS Integer
+    record AS Tuple<nCols TIMES String>
+    FOR EACH line IN linesIter DO
+        dataLine AS Tuple<String...> <- DO {{split @line around ','}}
+        nDataLine <- LENGTH OF dataLine
+        diff AS Integer <- nCols - nDataLine
+        IF diff < 0 THEN
+            RAISE {{format error: inconsistent column numbers}}
+        ELSE IF diff > 0 THEN
+            record <- dataLine + Tuple(diff TIMES "")
+        ELSE
+            record <- dataLine
+        ENDIF
+        DO {{append @record to @vpnGateCsv.data}}
+    ENDFOR
+    RETURN vpnGateCsv
+ENDFUNCTION
