@@ -1,6 +1,6 @@
 {#
     This Jinaja2 template must receive the following variables:
-    - `data`: The CSV data to be displayed in the table.
+    - `data`: A `VpnGateCsv` object with 'header' and 'rows' attributes.
     - `now`: The current timestamp for the footer.
 #}
 
@@ -9,8 +9,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Dynamic Table using Jinja2">
-    <title>Dynamic Table</title>
+    <meta name="description" content="VPN Gate CSV using Jinja2">
+    <title>VPN Gate CSV</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -39,20 +39,22 @@
 </head>
 <body>
     <header>
-        <h1>Dynamic Table</h1>
+        <h1>VPN Gate CSV</h1>
     </header>
     
     <main>
         <table>
             <thead>
                 <tr>
-                    {% for header in data[0] %}
-                    <th>{{ header }}</th>
+                    {# Iterate over the 'header' attribute of the data object #}
+                    {% for column in data.header %}
+                    <th>{{ column }}</th>
                     {% endfor %}
                 </tr>
             </thead>
             <tbody>
-                {% for row in data[1:] %}
+                {# Iterate over the 'rows' attribute of the data object #}
+                {% for row in data.rows %}
                 <tr>
                     {% for cell in row %}
                     <td>{{ cell }}</td>

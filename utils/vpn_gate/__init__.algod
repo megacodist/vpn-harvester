@@ -1,4 +1,4 @@
-CLASS VpnGateCsv :=
+CLASS VpnGateData :=
     CONST N_COLS AS Integer,
     header AS Tuple<N_COLS TIMES String>,
     data AS List<Tuple<N_COLS TIMES String>>,
@@ -9,32 +9,38 @@ CLASS VpnGateCsv :=
 ENDCLASS
 
 
-FUNCTION ParseVpnGateCsv(text AS String) -> VpnGateCsv :=
+FUNCTION ParseVpnGateData(text AS String) -> VpnGateData :=
     lines AS Tuple<String...> <- DO {{remove leading and trailing
         whitespace from @text & split it around newline characters}}
-    // Removing possible comments (starting with *)...
-    startIdx AS Index <- FIRST + 1 IF {{@lines[FIRST] starts with '*'}}
-        ELSE FIRST
-    stopIdx AS Index <- LAST - 1 IF {{@lines[LAST] starts with '*'}} 
-        ELSE LAST
-    lines <- lines[startIdx .. stopIdx]
-    // Parsing the first line as header...
-    linesIter AS Iterator<String> <- ITERATOR OF lines
-    IF linesIter EXHAUSTED THEN
-        RAISE {{header error: no header was found}}
+    // Identifying star- and hash-started line indices...
+    starIndices AS Set<Integer>, hashIndices AS Set<Integer> <- DO {{go
+        over the lines and find those starts with `*` or `#` and return
+        their indices separately as sets of integers}}
+    DO {{remove leading & trailing star-started lines (comments) based on
+        @starIndices & update both @starIndices and @hashIndices sets
+        accordingly}}
+    IF starIndices IS NOT EMPTY THEN
+        RAISE {{format error: comments (start-started lines) found in
+            the middle}}
     ENDIF
-    line <- NEXT linesIter
-    header AS Tuple<String...> <- DO {{split @line around ','}}
+    IF hashIndices != {0} THEN
+        RAISE {{format error: unsupported header position: @hashIndices}}
+    ENDIF
+    // Removing the leading '#' from the header...
+    lines[0] = lines[0][1:]  
+    // 
+    header AS Tuple<String...> <- DO {{parse @lines[0] as CSV}}
     nCols AS Integer <- LENGTH OF header
-    vpnGateCsv AS VpnGateCsv <- NEW VpnGateCsv(nCols)
-    vpnGateCsv.header <- header
+    vpnGateData AS VpnGateData <- NEW VpnGateData(nCols)
+    vpnGateData.header <- header
     // Parsing the rest of lines...
-    nDataLine AS Integer
+    nRowCols AS Integer
     record AS Tuple<nCols TIMES String>
-    FOR EACH line IN linesIter DO
-        dataLine AS Tuple<String...> <- DO {{split @line around ','}}
-        nDataLine <- LENGTH OF dataLine
-        diff AS Integer <- nCols - nDataLine
+    dataRows AS Tuple<Tuple<String...>...> <- DO {{parse @lines[1 .. ]
+        as CSV}}
+    FOR EACH row IN dataRows DO
+        nRowCols <- LENGTH OF row
+        diff AS Integer <- nCols - nRowCols
         IF diff < 0 THEN
             RAISE {{format error: inconsistent column numbers}}
         ELSE IF diff > 0 THEN
@@ -42,7 +48,7 @@ FUNCTION ParseVpnGateCsv(text AS String) -> VpnGateCsv :=
         ELSE
             record <- dataLine
         ENDIF
-        DO {{append @record to @vpnGateCsv.data}}
+        DO {{append @record to @vpnGateData.data}}
     ENDFOR
-    RETURN vpnGateCsv
+    RETURN vpnGateData
 ENDFUNCTION

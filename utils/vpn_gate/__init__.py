@@ -1,7 +1,11 @@
 import csv
 from dataclasses import dataclass
+from datetime import datetime
 import html
 from io import StringIO
+from pathlib import Path
+import sqlite3
+from typing import Iterator, Optional, Protocol
 
 
 @dataclass
@@ -10,11 +14,106 @@ class VpnGateData:
     A container for VPN Gate CSV data, separating headers from data rows.
     This class is used to encapsulate the parsed CSV data from VPN Gate.
     Attributes:
-        headers (list[str]): The header row of the CSV.
-        rows (list[list[str]]): The data rows of the CSV.
+        headers (tuple[str, ...]): The header row of the CSV.
+        rows (list[tuple[str, ...]]): The data rows of the CSV.
     """
-    headers: list[str]
-    rows: list[list[str]]
+    header: tuple[str, ...]
+    rows: list[tuple[str, ...]]
+
+
+class Ovpn:
+    def __init__(
+            self,
+            hostName: str,
+            ip: str,
+            udpPort: int | None,
+            tcpPort: int | None,
+            ovcUrl: str,
+            downloadedAt: datetime,
+            ) -> None:
+        self.hostName = hostName
+        self.ip = ip
+        self.udpPort = udpPort
+        self.tcpPort = tcpPort
+        self.ovcUrl = ovcUrl
+        self.downloadedAt = downloadedAt
+
+
+class IVpnGateableDb(Protocol):
+    def connect(self, path: Path) -> None: ...
+    def select(self, hostName: str) -> Optional[Ovpn]: ...
+    def update(self, ovpn: Ovpn) -> None: ...
+    def insert(self, ovpn: Ovpn) -> None: ...
+    def close(self) -> None: ...
+
+
+class SqliteDb(IVpnGateableDb): 
+    def __init__(self):
+        self._conn: sqlite3.Connection | None = None
+
+    def connect(self, path: Path) -> None:
+        self._conn = sqlite3.connect(path)
+        cursor = self._conn.cursor()
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ovpn (
+            host_name TEXT PRIMARY KEY,
+            ip TEXT,
+            udp_port INTEGER,
+            tcp_port INTEGER,
+            ovc_url TEXT,
+            downloaded_at TEXT
+        )
+        ''')
+        self._conn.commit()
+
+    def select(self, hostName: str) -> Optional[Ovpn]:
+        """
+        Select an OVPN entry by host name. Raises `RuntimeError` if the
+        database connection has not been established.
+        """
+        if self._conn is None:
+            raise RuntimeError(
+                "Database connection has not been established.")
+        cursor = self._conn.cursor()
+        cursor.execute('SELECT ip, udp_port, tcp_port, ovc_url, downloaded_at FROM ovpn WHERE host_name = ?', (hostName,))
+        row = cursor.fetchone()
+        if row:
+            return Ovpn(hostName, row[0], row[1], row[2], row[3], datetime.fromisoformat(row[4]))
+        return None
+
+    def update(self, ovpn: Ovpn) -> None:
+        """
+        Update an existing OVPN entry in the database. Raises `RuntimeError`
+        if the database connection has not been established.
+        """
+        if self._conn is None:
+            raise RuntimeError(
+                "Database connection has not been established.")
+        cursor = self._conn.cursor()
+        cursor.execute(
+            'UPDATE ovpn SET ip=?, udp_port=?, tcp_port=?, ovc_url=?, downloaded_at=? WHERE host_name=?',
+            (ovpn.ip, ovpn.udpPort, ovpn.tcpPort, ovpn.ovcUrl, ovpn.downloadedAt.isoformat(), ovpn.hostName)
+        )
+        self._conn.commit()
+
+    def insert(self, ovpn: Ovpn) -> None:
+        """
+        Insert a new OVPN entry into the database. Raises `RuntimeError`
+        if the database connection has not been established.
+        """
+        if self._conn is None:
+            raise RuntimeError(
+                "Database connection has not been established.")
+        cursor = self._conn.cursor()
+        cursor.execute(
+            'INSERT INTO ovpn (host_name, ip, udp_port, tcp_port, ovc_url, downloaded_at) VALUES (?, ?, ?, ?, ?, ?)',
+            (ovpn.hostName, ovpn.ip, ovpn.udpPort, ovpn.tcpPort, ovpn.ovcUrl, ovpn.downloadedAt.isoformat())
+        )
+        self._conn.commit()
+
+    def close(self) -> None:
+        if self._conn:
+            self._conn.close()
 
 
 def parseVpnGateCsv(csv_text: str) -> VpnGateData:
@@ -36,49 +135,57 @@ def parseVpnGateCsv(csv_text: str) -> VpnGateData:
         TypeError: If the underlying CSV data is not consistent with the
         expected format, such as missing headers or inconsistent row lengths.
     """
-    lines = csv_text.strip().splitlines()
-    # Filtering out the leading and trailing comment lines...
-    startIdx = 1 if lines and lines[0].startswith('*') else 0
-    stopIdx = len(lines) if lines and lines[-1].startswith('*') else None
+    lines = csv_text.splitlines()
+    lines = [line.strip() for line in lines]
+    # Identifying star- and hash-started line indices in the original list...
+    starIndices = {i for i, ln in enumerate(lines) if ln.startswith('*')}
+    hashIndices = {i for i, ln in enumerate(lines) if ln.startswith('#')}
+    # Removing leading & trailing star-started lines...
+    allIndices = set(range(len(lines)))
+    nonStarIndices = allIndices - starIndices
+    if not nonStarIndices:
+        raise TypeError("No non-asterisk lines to parse.")
+    temp = sorted(nonStarIndices)
+    startIdx, stopIdx = temp[0], temp[-1] + 1
+    # Remove leading/trailing '*' lines by slicing
     lines = lines[startIdx:stopIdx]
-    # Checking the header line...
-    noHeaderError: bool =  False
-    linesIter: Iterator[str] = iter(lines)
-    try:
-        line = next(linesIter)
-    except StopIteration:
-        noHeaderError =  True
-    else:
-        if not line.startswith('#'):
-            noHeaderError = True
-    if noHeaderError:
+    # Updating star- & hash- started lines indices
+    # after removing leading and traling start-started lines...
+    starIndices = {
+        idx - startIdx
+        for idx in starIndices
+        if startIdx < idx < stopIdx}
+    hashIndices = {
+        idx - startIdx
+        for idx in hashIndices
+        if startIdx < idx < stopIdx}
+    #
+    if starIndices:
         raise TypeError(
-            "Invalid format: Header line starting with '#' not found.")
-    # 
-    formatError: bool = any([
-        line.startswith('*') or line.startswith('#')
-        for line in lines])
-    if formatError:
+            "Comments (start-started lines) found in the middle")
+    if hashIndices != {0}:
         raise TypeError(
-            "Format error: unexpected comments or header in the CSV")
+            "Unsupported header position: " + str(hashIndices))
+    # Removing the leading '#' from the header...
+    lines[0] = lines[0][1:]  
     # Isolate header and data lines
     try:
         # Using the `csv` module for robust parsing...
         # Parsing header...
-        header_tuple = tuple(next(csv.reader(StringIO(lines[0]))))
-        n_cols = len(header_tuple)
+        tplHeader = tuple(next(csv.reader(StringIO(lines[0]))))
+        nCols = len(tplHeader)
         # Parsing data rows...
-        csv_file = StringIO('\n'.join(lines[1:]))
-        reader = csv.reader(csv_file)
+        strmCsv = StringIO('\n'.join(lines[1:]))
+        reader = csv.reader(strmCsv)
         processed_rows = []
         for i, row in enumerate(reader, start=1):
-            n_data_line = len(row)
-            diff = n_cols - n_data_line
+            nRowCols = len(row)
+            diff = nCols - nRowCols
             # Implement logic from AlgoDraft for row consistency
             if diff < 0:
                 raise TypeError(
-                    f"Format error on data row {i}: Found {n_data_line}"
-                    f" columns, but header has {n_cols}.")
+                    f"Format error on data row {i}: Found {nRowCols}"
+                    f" columns, but header has {nCols}.")
             elif diff > 0:
                 # Pad the row with empty strings if it's shorter
                 row.extend([''] * diff)
@@ -86,50 +193,52 @@ def parseVpnGateCsv(csv_text: str) -> VpnGateData:
             processed_rows.append(tuple(row)) # Store as immutable tuple
     except csv.Error as e:
         raise TypeError("Malformed CSV text could not be parsed.") from e
+    #
+    return VpnGateData(header=tplHeader, rows=processed_rows)
 
-    return VpnGateData(header=header_tuple, rows=processed_rows)
 
-
-def csvObjToHtmlTable(obj: VpnGateData, id: str = "", class_name: str = "") -> str:
+def csvObjToHtmlTable(
+        obj: VpnGateData,
+        id: str = "",
+        class_: str = "",
+        ) -> str:
     """
-    Converts a VpnGateData object into an HTML table string.
+    Converts a `VpnGateData` object into an HTML table string.
 
     Args:
-        obj: The VpnGateData object containing the header and rows.
-        id (str, optional): The ID to assign to the <table> element. Defaults to "".
-        class_name (str, optional): The class name(s) to assign to the <table>
-                                    element. Defaults to "".
+        obj: The `VpnGateData` object containing the header and rows.
+        id (str, optional): The ID to assign to the <table> element.
+            Defaults to "".
+        class_ (str, optional): The class name(s) to assign to the <table>
+            element. Defaults to "".
 
     Returns:
         A string containing the generated HTML table.
     """
     # Start building the table tag, adding id and class attributes if provided
-    table_attributes = []
+    tableAttrs = []
     if id:
-        table_attributes.append(f'id="{html.escape(id)}"')
-    if class_name:
-        table_attributes.append(f'class="{html.escape(class_name)}"')
+        tableAttrs.append(f'id="{html.escape(id)}"')
+    if class_:
+        tableAttrs.append(f'class="{html.escape(class_)}"')
     
-    html_parts = [f"<table {' '.join(table_attributes)}>"]
-
-    # Build the header
-    html_parts.append("  <thead>")
-    html_parts.append("    <tr>")
+    tableElem = [f"<table {' '.join(tableAttrs)}>"]
+    # Building the header...
+    tableElem.append("  <thead>")
+    tableElem.append("    <tr>")
     for header_item in obj.header:
-        html_parts.append(f"      <th>{html.escape(header_item)}</th>")
-    html_parts.append("    </tr>")
-    html_parts.append("  </thead>")
-
-    # Build the body
-    html_parts.append("  <tbody>")
+        tableElem.append(f"      <th>{html.escape(header_item)}</th>")
+    tableElem.append("    </tr>")
+    tableElem.append("  </thead>")
+    # Building the body...
+    tableElem.append("  <tbody>")
     for row in obj.rows:
-        html_parts.append("    <tr>")
+        tableElem.append("    <tr>")
         for cell in row:
-            html_parts.append(f"      <td>{html.escape(cell)}</td>")
-        html_parts.append("    </tr>")
-    html_parts.append("  </tbody>")
-
-    # Close the table
-    html_parts.append("</table>")
-
-    return "\n".join(html_parts)
+            tableElem.append(f"      <td>{html.escape(cell)}</td>")
+        tableElem.append("    </tr>")
+    tableElem.append("  </tbody>")
+    # Closing the table...
+    tableElem.append("</table>")
+    # Returning the final HTML string...
+    return "\n".join(tableElem)
