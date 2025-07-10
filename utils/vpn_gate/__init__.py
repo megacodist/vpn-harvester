@@ -158,7 +158,7 @@ def parseVpnGateCsv(csv_text: str) -> VpnGateData:
     hashIndices = {
         idx - startIdx
         for idx in hashIndices
-        if startIdx < idx < stopIdx}
+        if startIdx <= idx < stopIdx}
     #
     if starIndices:
         raise TypeError(

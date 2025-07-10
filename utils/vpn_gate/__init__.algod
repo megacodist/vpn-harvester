@@ -1,3 +1,164 @@
+CONCEPT
+    CLASS Ipv4 := {{a class representing IPv4 addresses}}
+    
+    CLASS Ipv6 := {{a class representing IPv6 addresses}}
+ENDCONCEPT
+
+
+CLASS CsvBase :=
+    CONST MP_HEADING_ATTR AS Mapping<ُString TO String>
+
+    FUNCTION GetHeadings() -> Set<String> :=
+        RETURN DO {{Create a set of all keys of @MP_HEADING_ATTR}}
+    ENDFUNCTION
+
+    // Exceptions:
+    //  * heading not found: at least one of the headings
+    METHOD NEW(
+            headings AS Tuple<String...>,
+            values AS Tuple<String...>,
+            ) :=
+        idx AS Integer
+        mpHeadingIdx AS Mapping<String TO Integer>
+        IF {{Mapping between headings and their indices has calculated
+                and exists in the cache}} THEN
+            mpHeadingIdx <- DO {{Read mapping associated with @headings}}
+        ELSE
+            TRY
+                FOR EACH heading IN MP_HEADING_ATTR DO
+                    idx <- DO {{Get index of @heading in @headings}}
+                    mpHeadingIdx[heading] <- idx
+                ENDFOR
+            CATCH {{index not ound}} DO
+                RAISE {{heading error: @heading not found}}
+            ENDTRY
+            DO {{}}
+        ENDIF
+    ENDMETHOD
+ENDCLASS
+
+
+CLASS ServerMetrics :=
+    savedAt AS DateTime,
+    score AS Integer,
+    ping AS Integer,
+    speed AS Integer,
+    nVpnSessions AS Integer,
+    uptime AS Integer,
+    totalUsers AS Integer,
+    totalTraffic AS Integer,
+ENDCLASS
+
+
+CLASS VpnGateServer :=
+    name AS String,
+    countryCode AS String,
+    countryName AS String,
+    ip AS Ipv4 OR Ipv6,
+    logType AS String,
+    operatorName AS String,
+    operatorMessage AS String,
+    metrics AS Mapping<DateTime TO ServerMetrics>,
+
+    CONST MP_HEADING_ATTR AS Mapping<String TO String> <- {{The ampping
+        between CSV column headings and @VpnGateServer attribute names.}}
+    
+    FUNCTION GetAllValidHeadings() -> Set<String> :=
+        RETURN DO {{Create a set of all keys of
+            @VpnGateServer.MP_HEADING_ATTR}}
+    ENDFUNCTION
+
+    METHOD NEW(mp_heading_value AS Mapping<String TO String>) :=
+        attr AS String
+        FOR EACH heading IN mp_heading_value DO
+            attr <- VpnGateServer.MP_HEADING_ATTR[heading]
+            DO {{Set @this attribute named @attr to
+                @mp_heading_value[heading]}}
+        ENDFOR
+    ENDMETHOD
+
+    METHOD GetLastUpdateTs() -> DateTime :=
+        {{Returns the last (the largest) timestamp of
+        @(KEYS OF this.metrics). Raises an error if the mapping is empty.}}
+    ENDMETHOD
+
+    METHOD UpdateWith(source AS VpnGateServer) :=
+        IF this.name != source.name THEN RAISE {{name mismatch error}}
+        IF this.GetLastUpdateTs() > source.GetLastUpdateTs() THEN
+            RAISE {{chronological order error}}
+        ENDIF
+        DO {{Replace @this attributes with @source attributes.}}
+        DO {{Extend @this.metrics with @source.metrics. Override on collide.}}
+    ENDMETHOD
+ENDCLASS
+
+
+INTERFACE IVpnGateableDb :=
+    {{ This interface is supposed to work with a database containing the
+    following tables:
+        CREATE TABLE IF NOT EXISTS country(
+            country_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            country_code VARCHAR(10) NOT NULL UNIQUE,
+            country_name VARCHAR(255) NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS vpn_config (
+            config_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name VARCHAR(255) NOT NULL UNIQUE,
+            ip VARCHAR(45) NOT NULL UNIQUE,
+            country_id INTEGER NOT NULL REFERENCES country(country_id),
+            log_type             VARCHAR(255),
+            operator_name        TEXT,
+            operator_message     TEXT,
+            ovpn_config_base64   TEXT
+        );
+        CREATE TABLE If NOT EXISTS vpn_metrics (
+            metrics_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_id            INTEGER NOT NULL REFERENCES vpn_config(config_id),
+            saved_ts            TIMESTAMP NOT NULL,
+            score                BIGINT,
+            ping_ms              INTEGER,
+            speed_bps            BIGINT,
+            num_vpn_sessions     INTEGER,
+            uptime_ms            BIGINT,
+            total_users          BIGINT,
+            total_traffic_bytes  BIGINT,
+            UNIQUE (config_id, saved_ts)
+        );
+    }}
+    METHOD connectDb(path AS FsPath) := 
+        {{connects to a database file on the file system}}
+    ENDMETHOD
+    METHOD CheckDb() -> Boolean :=
+        {{Checks whether the connected database contains necessary tables
+        and columns inside each table.}}
+    ENDMETHOD
+    METHOD CreateEmptyDb(path AS FsPath) :=
+        {{Creates an empty database with the necessary tables and columns
+        at the specified file system path.}}
+    ENDMETHOD
+    METHOD exists(server_name AS String) -> Boolean :=
+        {{Specifies whether a server with the provided name exists in
+        the database or not.}}
+    ENDMETHOD
+    METHOD select(server_name AS String) -> VpnGateServer OR NULL := 
+        {{Returns information associated `server_name` name in the database
+        as an `VpnGateServer` object. Raises an error if the name
+        doesn't exist.}}
+    ENDMETHOD
+    METHOD insertUpdate(server AS VpnGateServer) := 
+        {{Inserts a new server in the database using the provided object.
+        If a server with the same name already exists in the database, it
+        updates the configuration of and adds a new metrics record to the
+        server .}}
+    ENDMETHOD
+    METHOD delete(server_name AS String) :=
+        {{Deletes all the information associated with the server named
+        `server_name`. It does nothing, if no such server exists.}}
+    ENDMETHOD
+    METHOD close() := {{closes the database connection}}
+ENDINTERFACE
+
+
 CLASS VpnGateData :=
     CONST N_COLS AS Integer,
     header AS Tuple<N_COLS TIMES String>,
@@ -30,6 +191,9 @@ FUNCTION ParseVpnGateData(text AS String) -> VpnGateData :=
     lines[0] = lines[0][1:]  
     // 
     header AS Tuple<String...> <- DO {{parse @lines[0] as CSV}}
+    IF NEW Set(header) != VpnGateServer.MP_HEADING_ATTR THEN
+        RAISE {{unknown columns}}
+    ENDIF
     nCols AS Integer <- LENGTH OF header
     vpnGateData AS VpnGateData <- NEW VpnGateData(nCols)
     vpnGateData.header <- header

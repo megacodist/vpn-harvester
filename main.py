@@ -1,3 +1,4 @@
+import binascii
 import csv
 import base64
 import re
@@ -49,49 +50,45 @@ def slugify(text: str, delim: str = "-") -> str:
     return delim.join(filtered_parts)
 
 
-def processRows(
-        text: str,
-        db: IVpnGateableDb,
-        outputDir: Path,
-        url: str,
-    ) -> None:
-    reader = csv.reader(text.splitlines())
-    for row in reader:
-        if not row or row[0].startswith('#'):
+def saveOvpnFiles(dir_: Path, vpnGateData: VpnGateData) -> None:
+    # Getting the index of host name column...
+    try:
+        idxHostName = vpnGateData.header.index('HostName')
+    except ValueError:
+        print("Failed to find host name column.")
+        sys.exit(1)
+    # Getting the index of OpenVPN base64 column...
+    try:
+        idxBase64 = vpnGateData.header.index("OpenVPN_ConfigData_Base64")
+    except ValueError:
+        print("Failed to find OpenVPN Base64 column.")
+        sys.exit(1)
+    for row in vpnGateData.rows:
+        # Getting host name...
+        try:
+            hostName = row[idxHostName]
+        except IndexError:
+            print(f"No host name of `{row}`")
             continue
-        if not row[0] or not row[0].isdigit():
-            print(f'Skipping row with invalid public IP: {row[0]}')
+        # Getting OpenVPN base64 text...
+        try:
+            b64Ovpn = row[idxBase64]
+        except IndexError:
+            print(f"No OpenVPN config data of `{hostName}`")
             continue
-        if not row[4] or not row[4].strip().isalnum():
-            print(f'Skipping row with empty host name: {row[4]}')
+        # Decoding the Base64 OpenVPN config...
+        try:
+            binBase64 = base64.b64decode(b64Ovpn)
+        except (binascii.Error) as err:
+            print(f"Skipping {hostName}: Base64 decode error: {err}")
             continue
-        if not row[14]:
-            print(f'Skipping row with empty OVPN base64 data: {row[14]}')
-            continue
-
-        publicIp = row[0]
-        hostName = row[4]
-        ovpnBase64 = row[14]
-        udpPort = int(row[11]) if row[11] else None
-        tcpPort = int(row[12]) if row[12] else None
-        configData = base64.b64decode(ovpnBase64)
-
-        slug = slugify(hostName)
-        filename = f"{slug}_{publicIp}.ovpn"
-        filepath = outputDir / filename
-
-        existing = db.select(hostName)
-        ovpn = Ovpn(hostName, publicIp, udpPort, tcpPort, url, datetime.utcnow())
-
-        if existing:
-            if (existing.ip, existing.udpPort, existing.tcpPort) != (ovpn.ip, ovpn.udpPort, ovpn.tcpPort):
-                print(f'Updating VPN config: {filename}')
-                filepath.write_bytes(configData)
-                db.update(ovpn)
-        else:
-            print(f'Downloading new VPN config: {filename}')
-            filepath.write_bytes(configData)
-            db.insert(ovpn)
+        # Writing to .ovpn file...
+        filename = f"{hostName}.ovpn"
+        filepath = OVPNS_DIR / filename
+        with open(filepath, 'wb') as f:
+            f.write(binBase64)
+        print(f"Written {filepath}")
+        
 
 
 def renderHtmlFromCsv(
@@ -164,6 +161,7 @@ def main() -> None:
         csvData,
         APP_DIR / 'vpn-gate-report.j2',
         APP_DIR / 'vpn-gate-report.html')
+    saveOvpnFiles(OVPNS_DIR, csvData)
     print('Done.')
 
 
