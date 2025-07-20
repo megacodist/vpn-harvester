@@ -7,6 +7,7 @@ ENDCONCEPT
 
 CLASS CsvBase :=
     CONST MP_HEADING_ATTR AS Mapping<ُString TO String>
+    updated AS Boolean
 
     FUNCTION GetHeadings() -> Set<String> :=
         RETURN DO {{Create a set of all keys of @MP_HEADING_ATTR}}
@@ -20,7 +21,7 @@ CLASS CsvBase :=
             ) :=
         idx AS Integer
         mpHeadingIdx AS Mapping<String TO Integer>
-        IF {{Mapping between headings and their indices has calculated
+        IF {{Mapping between headings and their indices has calculated befpre
                 and exists in the cache}} THEN
             mpHeadingIdx <- DO {{Read mapping associated with @headings}}
         ELSE
@@ -32,14 +33,45 @@ CLASS CsvBase :=
             CATCH {{index not ound}} DO
                 RAISE {{heading error: @heading not found}}
             ENDTRY
-            DO {{}}
+            DO {{Associate @mpHeadingIdx with @headings in the cache}}
+            FOR EACH heading, idx IN mpHeadingIdx DO
+                DO {{Set @MP_HEADING_ATTR[heading] attribute of @this
+                    to @values[idx]}}
+            ENDFOR
+            this.updated <- TRUE
         ENDIF
     ENDMETHOD
 ENDCLASS
 
 
-CLASS ServerMetrics :=
-    savedAt AS DateTime,
+CLASS VpnConfig INHERITS CsvBase :=
+    CONST MP_HEADING_ATTR AS Mapping<String TO String> <- DO {{Create a
+        mapping corresponding CSV headings and @VpnConfig attributes.}}
+    id AS Integer,
+    name AS String,
+    countryCode AS String,
+    countryName AS String,
+    ip AS Ipv4 OR Ipv6,
+    logType AS String,
+    operatorName AS String,
+    operatorMsg AS String,
+
+    METHOD UpdateWith(source AS VpnConfig) :=
+        this.id <- source.id
+        this.name <- source.name
+        this.countryCode <- source.countryCode
+        this.countryName <- source.countryName
+        this.ip <- source.ip
+        this.logType <- source.logType
+        this.operatorName <- source.operatorName
+        this.operatorMsg <- source.operatorMsg
+    ENDMETHOD
+ENDCLASS
+
+
+CLASS OwnerStat INHERITS CsvBase IMPLEMENTS :=
+    id AS Integer,
+    dtSaved AS DateTime,
     score AS Integer,
     ping AS Integer,
     speed AS Integer,
@@ -50,45 +82,65 @@ CLASS ServerMetrics :=
 ENDCLASS
 
 
-CLASS VpnGateServer :=
-    name AS String,
-    countryCode AS String,
-    countryName AS String,
-    ip AS Ipv4 OR Ipv6,
-    logType AS String,
-    operatorName AS String,
-    operatorMessage AS String,
-    metrics AS Mapping<DateTime TO ServerMetrics>,
+CLASS UserTest :=
+    id AS Integer,
+    dtSaved AS DateTime,
+    ping AS Integer,
+    speed AS Integer,
+ENDCLASS
 
-    CONST MP_HEADING_ATTR AS Mapping<String TO String> <- {{The ampping
-        between CSV column headings and @VpnGateServer attribute names.}}
+
+CLASS VpnGateServer :=
+    config AS VpnConfig,
+    stats AS Mapping<DateTime TO OwnerStat>,
+    tests AS Mapping<DateTime TO UserTest>,
     
-    FUNCTION GetAllValidHeadings() -> Set<String> :=
-        RETURN DO {{Create a set of all keys of
-            @VpnGateServer.MP_HEADING_ATTR}}
+    FUNCTION GetAllHeadings() -> Set<String> :=
+        RETURN VpnConfig.GetHeadings() UNION OwnerStat.GetHeadings()
     ENDFUNCTION
 
-    METHOD NEW(mp_heading_value AS Mapping<String TO String>) :=
-        attr AS String
-        FOR EACH heading IN mp_heading_value DO
-            attr <- VpnGateServer.MP_HEADING_ATTR[heading]
-            DO {{Set @this attribute named @attr to
-                @mp_heading_value[heading]}}
-        ENDFOR
+    METHOD NEW(
+            config AS VpnConfig,
+            stats AS IIterable<OwnerStat> OR NULL <- NULL,
+            tests AS IIterable<UserTest> OR NULL <- NULL,
+            ) :=
+        // Initializing the `config`...
+        this.config <- config
+        // Initializing the `stats`...
+        this.stats <- NEW Mapping() // An empty mapping
+        IF stats != NULL THEN
+            FOR EACH stat IN stats DO
+                this.stats[stat.dtSaved] <- stat
+            ENDFOR
+        ENDIF
+        // Initializing the `tests`...
+        this.tests <- NEW Mapping() // An empty mapping
+        IF tests != NULL THEN
+            FOR EACH test IN tests DO
+                this.tests[test.dtSaved] <- test
+            ENDFOR
+        ENDIF
     ENDMETHOD
 
-    METHOD GetLastUpdateTs() -> DateTime :=
-        {{Returns the last (the largest) timestamp of
-        @(KEYS OF this.metrics). Raises an error if the mapping is empty.}}
+    // Gets the timestamp of the most recent `OwnerStat`.
+    METHOD GetLastStatDt() -> DateTime :=
+        RETURN MAX OF KEYS OF this.stats
+    ENDMETHOD
+
+    // Gets the timestamp of the most recent `UserTest`.
+    METHOD GetLastTestDt() -> DateTime :=
+        RETURN MAX OF KEYS OF this.tests
     ENDMETHOD
 
     METHOD UpdateWith(source AS VpnGateServer) :=
-        IF this.name != source.name THEN RAISE {{name mismatch error}}
-        IF this.GetLastUpdateTs() > source.GetLastUpdateTs() THEN
+        IF this.config.name != source.config.name THEN
+            RAISE {{name mismatch error}}
+        ENDIF
+        IF this.GetLastStatDt() > source.GetLastStatDt() THEN
             RAISE {{chronological order error}}
         ENDIF
-        DO {{Replace @this attributes with @source attributes.}}
-        DO {{Extend @this.metrics with @source.metrics. Override on collide.}}
+        this.config.UpdateWith(source.config)
+        DO {{Extend @this.stats with @source.stats. Override on collide.}}
     ENDMETHOD
 ENDCLASS
 
@@ -96,23 +148,19 @@ ENDCLASS
 INTERFACE IVpnGateableDb :=
     {{ This interface is supposed to work with a database containing the
     following tables:
-        CREATE TABLE IF NOT EXISTS country(
-            country_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            country_code VARCHAR(10) NOT NULL UNIQUE,
-            country_name VARCHAR(255) NOT NULL UNIQUE
-        );
         CREATE TABLE IF NOT EXISTS vpn_config (
             config_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name VARCHAR(255) NOT NULL UNIQUE,
             ip VARCHAR(45) NOT NULL UNIQUE,
-            country_id INTEGER NOT NULL REFERENCES country(country_id),
+            country_code VARCHAR(10) NOT NULL UNIQUE,
+            country_name VARCHAR(255) NOT NULL UNIQUE,
             log_type             VARCHAR(255),
             operator_name        TEXT,
             operator_message     TEXT,
             ovpn_config_base64   TEXT
         );
-        CREATE TABLE If NOT EXISTS vpn_metrics (
-            metrics_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        CREATE TABLE If NOT EXISTS owner_stat (
+            stat_id INTEGER PRIMARY KEY AUTOINCREMENT,
             config_id            INTEGER NOT NULL REFERENCES vpn_config(config_id),
             saved_ts            TIMESTAMP NOT NULL,
             score                BIGINT,
@@ -122,6 +170,14 @@ INTERFACE IVpnGateableDb :=
             uptime_ms            BIGINT,
             total_users          BIGINT,
             total_traffic_bytes  BIGINT,
+            UNIQUE (config_id, saved_ts)
+        );
+        CREATE TABLE If NOT EXISTS owner_stat (
+            stat_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_id            INTEGER NOT NULL REFERENCES vpn_config(config_id),
+            saved_ts            TIMESTAMP NOT NULL,
+            ping_ms              INTEGER,
+            speed_bps            BIGINT,
             UNIQUE (config_id, saved_ts)
         );
     }}
@@ -148,7 +204,7 @@ INTERFACE IVpnGateableDb :=
     METHOD insertUpdate(server AS VpnGateServer) := 
         {{Inserts a new server in the database using the provided object.
         If a server with the same name already exists in the database, it
-        updates the configuration of and adds a new metrics record to the
+        updates the configuration of and adds a new stats record to the
         server .}}
     ENDMETHOD
     METHOD delete(server_name AS String) :=
