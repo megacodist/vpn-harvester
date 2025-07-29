@@ -1,0 +1,25 @@
+IMPORT
+    CLASS VpnGateServer FROM utils.vpn_gate;
+    FUNCTION ParseVpnGateData FROM utils.vpn_gate;
+    INTERFACE IVpnGateableDb FROM utils.vpn_gate;
+ENDIMPORT
+
+
+CONCEPT
+    CLASS VpnGateSqlite IMPLEMENTS IVpnGateableDb :=
+        {{Implements @IVpnGateableDb using SQLite.}}
+    ENDCLASS
+ENDCONCEPT
+
+
+CLASS VpnGateManager :=
+    mpNameServer AS Mapping<String -> VpnGateServer>,
+
+    METHOD ReadDb() :=
+    ENDMETHOD
+ENDCLASS
+
+
+// The main entry point of the program
+FUNCTION Main() :=
+ENDFUNCTION

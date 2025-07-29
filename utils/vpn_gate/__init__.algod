@@ -6,8 +6,8 @@ ENDCONCEPT
 
 
 CLASS CsvBase :=
-    CONST MP_HEADING_ATTR AS Mapping<ُString TO String>
-    updated AS Boolean
+    CONST MP_HEADING_ATTR AS Mapping<ُString -> String>,
+    updated AS Boolean,
 
     FUNCTION GetHeadings() -> Set<String> :=
         RETURN DO {{Create a set of all keys of @MP_HEADING_ATTR}}
@@ -20,33 +20,34 @@ CLASS CsvBase :=
             values AS Tuple<String...>,
             ) :=
         idx AS Integer
-        mpHeadingIdx AS Mapping<String TO Integer>
-        IF {{Mapping between headings and their indices has calculated befpre
+        mpHeadingIdx AS Mapping<String -> Integer>
+        IF {{Mapping between headings and their indices has calculated before
                 and exists in the cache}} THEN
             mpHeadingIdx <- DO {{Read mapping associated with @headings}}
         ELSE
+            mpHeadingIdx <- NEW Mapping()
             TRY
                 FOR EACH heading IN MP_HEADING_ATTR DO
                     idx <- DO {{Get index of @heading in @headings}}
                     mpHeadingIdx[heading] <- idx
                 ENDFOR
             CATCH {{index not ound}} DO
-                RAISE {{heading error: @heading not found}}
+                RAISE {{heading not found: @heading}}
             ENDTRY
             DO {{Associate @mpHeadingIdx with @headings in the cache}}
-            FOR EACH heading, idx IN mpHeadingIdx DO
-                DO {{Set @MP_HEADING_ATTR[heading] attribute of @this
-                    to @values[idx]}}
-            ENDFOR
-            this.updated <- TRUE
         ENDIF
+        FOR EACH heading, idx IN mpHeadingIdx DO
+            DO {{Set @MP_HEADING_ATTR[heading] attribute of @this
+                to @values[idx]}}
+        ENDFOR
+        this.updated <- TRUE
     ENDMETHOD
 ENDCLASS
 
 
 CLASS VpnConfig INHERITS CsvBase :=
-    CONST MP_HEADING_ATTR AS Mapping<String TO String> <- DO {{Create a
-        mapping corresponding CSV headings and @VpnConfig attributes.}}
+    CONST MP_HEADING_ATTR AS Mapping<String -> String> <- DO {{Create a
+        mapping corresponding CSV headings and @VpnConfig attribute names.}},
     id AS Integer,
     name AS String,
     countryCode AS String,
@@ -69,7 +70,9 @@ CLASS VpnConfig INHERITS CsvBase :=
 ENDCLASS
 
 
-CLASS OwnerStat INHERITS CsvBase IMPLEMENTS :=
+CLASS OwnerStat INHERITS CsvBase IMPLEMENTS IEquatable :=
+    CONST MP_HEADING_ATTR AS Mapping<String -> String> <- DO {{Create a
+        mapping corresponding CSV headings and @OwnerStat attribute names.}},
     id AS Integer,
     dtSaved AS DateTime,
     score AS Integer,
@@ -79,6 +82,21 @@ CLASS OwnerStat INHERITS CsvBase IMPLEMENTS :=
     uptime AS Integer,
     totalUsers AS Integer,
     totalTraffic AS Integer,
+
+    OPERATOR this = (other AS Object) :=
+        IF other IS NOT AN OwnerStat THEN
+            RAISE {{unsupported type: expected @OwnerStat but got
+                @(TYPE OF other)}}
+        ENDIF
+        RETURN DO {{Check if all attributes of @this equal their counterparts
+            in @other}}
+    ENDOPERATOR
+
+    METHOD EqualsButIdTs(other AS OwnerStat) -> Boolean :=
+        {{Checks if all attributes of this object are equal to their
+        counterparts in @other except for @OwnerStat.id and
+        @OwnerStat.dtSaved}}
+    ENDMETHOD
 ENDCLASS
 
 
@@ -92,8 +110,8 @@ ENDCLASS
 
 CLASS VpnGateServer :=
     config AS VpnConfig,
-    stats AS Mapping<DateTime TO OwnerStat>,
-    tests AS Mapping<DateTime TO UserTest>,
+    stats AS Mapping<DateTime -> OwnerStat>,
+    tests AS Mapping<DateTime -> UserTest>,
     
     FUNCTION GetAllHeadings() -> Set<String> :=
         RETURN VpnConfig.GetHeadings() UNION OwnerStat.GetHeadings()
@@ -132,15 +150,64 @@ CLASS VpnGateServer :=
         RETURN MAX OF KEYS OF this.tests
     ENDMETHOD
 
-    METHOD UpdateWith(source AS VpnGateServer) :=
-        IF this.config.name != source.config.name THEN
-            RAISE {{name mismatch error}}
+    METHOD UpdateWith(server AS VpnGateServer) :=
+        // Looking for name conflict...
+        IF this.config.name != server.config.name THEN
+            RAISE {{name mismatch error: expected @(this.config.name) got 
+                @(server.config.name)}}
         ENDIF
-        IF this.GetLastStatDt() > source.GetLastStatDt() THEN
+        // Looking for ID conflict...
+        id AS Integer OR NULL
+        IF server.config.id != NULL THEN
+            IF this.config.id = NULL THEN
+                id <- server.config.id
+            ELSE
+                RAISE {{conflicting IDs: @(this.config.id) and
+                    @(server.config.id)}}
+            ENDIF
+        ELSE
+            id <- this.config.id
+        ENDIF
+        //
+        IF this.GetLastStatDt() > server.GetLastStatDt() THEN
             RAISE {{chronological order error}}
         ENDIF
-        this.config.UpdateWith(source.config)
-        DO {{Extend @this.stats with @source.stats. Override on collide.}}
+        this.config.UpdateWith(server.config)
+        DO {{Extend @this.stats with @server.stats. Override on collide.}}
+    ENDMETHOD
+
+    // Adds a `OwnerStat` to this `VpnGateServer`. If the same statistics
+    // already exist just before or after the timestamp, it does nothing.
+    // Exceptions:
+    // 1. `different metrics at the same timestamp`: the timestamp of `stat`
+    //    already exists with different metrics.
+    METHOD AddStat(stat AS OwnerStat) :=
+        slt AS SoretdList<DateTime> <- NEW SoretdList(KEYS OF this.stats)
+        idx AS Integer <- DO {{Find insertion index of @stat.tsSaved into
+            @slt before possibly equal values}}
+        prevMrgTest AS Boolean <- TRUE
+        nextMrgTest AS Boolean <- TRUE
+        existTest AS Boolean <- TRUE
+        IF {{@idx indicates as the first element}} THEN
+            prevMrgTest <- FALSE
+        ELSE IF {{@idx indicates after the last element (LAST + 1)}} THEN
+            nextMrgTest <- FALSE
+            existTest <- FALSE
+        ENDIF
+        // Checking if the timestamp already exists...
+        IF existTest THEN
+            IF slt[idx] = stat.tsSaved THEN
+                IF NOT stat.EqualsButIdTs(slt[idx]) THEN
+                    RAISE {{different metrics at the same timestamp}}
+                ENDIF
+            ENDIF
+        ENDIF
+        // Inserting if the stat is an NOT the same as chronologically
+        // previous and/or next stats...
+        IF NOT ((prevMrgTest AND stat.EqualsButIdTs(slt[idx - 1])) OR (
+                nextMrgTest AND stat.EqualsButIdTs(slt[idx]))) THEN
+            this.stats[stat.tsSaved] <- stat
+        ENDIF
     ENDMETHOD
 ENDCLASS
 
@@ -152,8 +219,8 @@ INTERFACE IVpnGateableDb :=
             config_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name VARCHAR(255) NOT NULL UNIQUE,
             ip VARCHAR(45) NOT NULL UNIQUE,
-            country_code VARCHAR(10) NOT NULL UNIQUE,
-            country_name VARCHAR(255) NOT NULL UNIQUE,
+            country_code VARCHAR(10) NOT NULL,
+            country_name VARCHAR(255) NOT NULL,
             log_type             VARCHAR(255),
             operator_name        TEXT,
             operator_message     TEXT,
@@ -161,7 +228,7 @@ INTERFACE IVpnGateableDb :=
         );
         CREATE TABLE If NOT EXISTS owner_stat (
             stat_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            config_id            INTEGER NOT NULL REFERENCES vpn_config(config_id),
+            config_id            INTEGER NOT NULL,
             saved_ts            TIMESTAMP NOT NULL,
             score                BIGINT,
             ping_ms              INTEGER,
@@ -170,52 +237,56 @@ INTERFACE IVpnGateableDb :=
             uptime_ms            BIGINT,
             total_users          BIGINT,
             total_traffic_bytes  BIGINT,
-            UNIQUE (config_id, saved_ts)
+            UNIQUE (config_id, saved_ts),
+            FOREIGN KEY (config_id) REFERENCES vpn_config(config_id)
+                ON DELETE CASCADE
         );
-        CREATE TABLE If NOT EXISTS owner_stat (
-            stat_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            config_id            INTEGER NOT NULL REFERENCES vpn_config(config_id),
+        CREATE TABLE If NOT EXISTS user_test (
+            test_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_id            INTEGER NOT NULL,
             saved_ts            TIMESTAMP NOT NULL,
             ping_ms              INTEGER,
             speed_bps            BIGINT,
-            UNIQUE (config_id, saved_ts)
+            UNIQUE (config_id, saved_ts),
+            FOREIGN KEY (config_id) REFERENCES vpn_config(config_id)
+                ON DELETE CASCADE
         );
     }}
+    FUNCTION CreateEmptyDb(path AS FsPath) :=
+        {{Creates an empty database with the necessary tables and columns
+        at the specified file system path.}}
+    ENDFUNCTION
     METHOD connectDb(path AS FsPath) := 
         {{connects to a database file on the file system}}
     ENDMETHOD
     METHOD CheckDb() -> Boolean :=
-        {{Checks whether the connected database contains necessary tables
+        {{Checks whether this connected database contains necessary tables
         and columns inside each table.}}
     ENDMETHOD
-    METHOD CreateEmptyDb(path AS FsPath) :=
-        {{Creates an empty database with the necessary tables and columns
-        at the specified file system path.}}
-    ENDMETHOD
-    METHOD exists(server_name AS String) -> Boolean :=
+    METHOD Exists(server_name AS String) -> Boolean :=
         {{Specifies whether a server with the provided name exists in
         the database or not.}}
     ENDMETHOD
-    METHOD select(server_name AS String) -> VpnGateServer OR NULL := 
-        {{Returns information associated `server_name` name in the database
-        as an `VpnGateServer` object. Raises an error if the name
+    METHOD Select(server_name AS String) -> VpnGateServer OR NULL := 
+        {{Returns information associated @server_name name in the database
+        as an @VpnGateServer object. Returns @NULL if the name
         doesn't exist.}}
     ENDMETHOD
-    METHOD insertUpdate(server AS VpnGateServer) := 
+    METHOD UpsertServer(server AS VpnGateServer) := 
         {{Inserts a new server in the database using the provided object.
         If a server with the same name already exists in the database, it
         updates the configuration of and adds a new stats record to the
         server .}}
     ENDMETHOD
-    METHOD delete(server_name AS String) :=
+    METHOD Delete(server_name AS String) :=
         {{Deletes all the information associated with the server named
-        `server_name`. It does nothing, if no such server exists.}}
+        @server_name. It does nothing, if no such server exists.}}
     ENDMETHOD
-    METHOD close() := {{closes the database connection}}
+    METHOD Close() := {{closes the database connection}} ENDMETHOD
 ENDINTERFACE
 
 
-CLASS VpnGateData :=
+CLASS VpnGateCsvData :=
     CONST N_COLS AS Integer,
     header AS Tuple<N_COLS TIMES String>,
     data AS List<Tuple<N_COLS TIMES String>>,
@@ -226,7 +297,7 @@ CLASS VpnGateData :=
 ENDCLASS
 
 
-FUNCTION ParseVpnGateData(text AS String) -> VpnGateData :=
+FUNCTION ParseVpnGateData(text AS String) -> VpnGateCsvData :=
     lines AS Tuple<String...> <- DO {{remove leading and trailing
         whitespace from @text & split it around newline characters}}
     // Identifying star- and hash-started line indices...
@@ -251,7 +322,7 @@ FUNCTION ParseVpnGateData(text AS String) -> VpnGateData :=
         RAISE {{unknown columns}}
     ENDIF
     nCols AS Integer <- LENGTH OF header
-    vpnGateData AS VpnGateData <- NEW VpnGateData(nCols)
+    vpnGateData AS VpnGateCsvData <- NEW VpnGateCsvData(nCols)
     vpnGateData.header <- header
     // Parsing the rest of lines...
     nRowCols AS Integer
