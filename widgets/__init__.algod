@@ -1,5 +1,5 @@
 IMPORT
-    CLASS VpnGateServer FROM utils.vpn_gate;
+    CLASS VpnGateServer, VpnGateCsvData FROM utils.vpn_gate;
     FUNCTION ParseVpnGateData FROM utils.vpn_gate;
     INTERFACE IVpnGateableDb FROM utils.vpn_gate;
 ENDIMPORT
@@ -13,9 +13,37 @@ ENDCONCEPT
 
 
 CLASS VpnGateManager :=
+    db AS IVpnGateableDb,
     mpNameServer AS Mapping<String -> VpnGateServer>,
+    delServerNames AS List<String...>,
+    updServerNames AS List<String...>,
 
+    METHOD NEW(db AS IVpnGateableDb) :=
+        this.db <- db
+        this.mpNameServer <- NEW Mapping()
+        this.delServerNames <- NEW List()
+    ENDMETHOD
     METHOD ReadDb() :=
+        servers AS Tuple<VpnGateServer...> <- this.db.ReadAllServers()
+        FOR EACH server IN servers DO
+            this[server.name] <- server
+        ENDFOR
+    ENDMETHOD
+    METHOD ReadUrl(url AS String) :=
+        text As String <- DO {{Read the text resource at @url}}
+        csvData AS VpnGateCsvData <- ParseVpnGateData(text)
+        FOR EACH row IN csvData.data DO
+            .
+        ENDFOR
+    ENDMETHOD
+    METHOD DelServer(server_name AS String) :=
+        TRY
+            DEL this.mpNameServer[server_name]
+        CATCH {{key error}} DO
+            NOTIFY {{no such server name was found: @server_name}}
+        ELSE
+            APPEND server_name TO delServerNames
+        ENDTRY
     ENDMETHOD
 ENDCLASS
 

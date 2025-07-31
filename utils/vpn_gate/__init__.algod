@@ -7,7 +7,7 @@ ENDCONCEPT
 
 CLASS CsvBase :=
     CONST MP_HEADING_ATTR AS Mapping<ُString -> String>,
-    updated AS Boolean,
+    id As Integer OR NULL,
 
     FUNCTION GetHeadings() -> Set<String> :=
         RETURN DO {{Create a set of all keys of @MP_HEADING_ATTR}}
@@ -22,7 +22,7 @@ CLASS CsvBase :=
         idx AS Integer
         mpHeadingIdx AS Mapping<String -> Integer>
         IF {{Mapping between headings and their indices has calculated before
-                and exists in the cache}} THEN
+                and exists in the class-specific cache}} THEN
             mpHeadingIdx <- DO {{Read mapping associated with @headings}}
         ELSE
             mpHeadingIdx <- NEW Mapping()
@@ -40,7 +40,9 @@ CLASS CsvBase :=
             DO {{Set @MP_HEADING_ATTR[heading] attribute of @this
                 to @values[idx]}}
         ENDFOR
-        this.updated <- TRUE
+        // Creating an object from CSV parsed data, causes `id` to be
+        // `NULL`...
+        this.id <- NULL
     ENDMETHOD
 ENDCLASS
 
@@ -48,7 +50,7 @@ ENDCLASS
 CLASS VpnConfig INHERITS CsvBase :=
     CONST MP_HEADING_ATTR AS Mapping<String -> String> <- DO {{Create a
         mapping corresponding CSV headings and @VpnConfig attribute names.}},
-    id AS Integer,
+    id AS Integer OR NULL,
     name AS String,
     countryCode AS String,
     countryName AS String,
@@ -57,15 +59,32 @@ CLASS VpnConfig INHERITS CsvBase :=
     operatorName AS String,
     operatorMsg AS String,
 
-    METHOD UpdateWith(source AS VpnConfig) :=
-        this.id <- source.id
-        this.name <- source.name
-        this.countryCode <- source.countryCode
-        this.countryName <- source.countryName
-        this.ip <- source.ip
-        this.logType <- source.logType
-        this.operatorName <- source.operatorName
-        this.operatorMsg <- source.operatorMsg
+    // Exceptions:
+    //  1. {{mismatching config names}}: this and other `VpnConfig` values
+    //      have different names.
+    //  2. {{conflicting config IDs}}: this and other `VpnConfig` values
+    //      have different non-null integers.
+    METHOD UpdateWith(other AS VpnConfig) :=
+        // Looking for name mismatch...
+        IF this.name != other.name THEN
+            RAISE {{mismatching config names: expected @(this.name) got 
+                @(other.name)}}
+        ENDIF
+        // Looking for conflicting IDs...
+        IF other.id != NULL THEN
+            IF this.id = NULL THEN
+                this.id <- other.id
+            ELSE
+                RAISE {{conflicting config IDs: @(this.id) and @(other.id)}}
+            ENDIF
+        ENDIF
+        // Updating non-identifying attributes...
+        this.countryCode <- other.countryCode
+        this.countryName <- other.countryName
+        this.ip <- other.ip
+        this.logType <- other.logType
+        this.operatorName <- other.operatorName
+        this.operatorMsg <- other.operatorMsg
     ENDMETHOD
 ENDCLASS
 
@@ -73,7 +92,7 @@ ENDCLASS
 CLASS OwnerStat INHERITS CsvBase IMPLEMENTS IEquatable :=
     CONST MP_HEADING_ATTR AS Mapping<String -> String> <- DO {{Create a
         mapping corresponding CSV headings and @OwnerStat attribute names.}},
-    id AS Integer,
+    id AS Integer OR NULL,
     dtSaved AS DateTime,
     score AS Integer,
     ping AS Integer,
@@ -101,7 +120,7 @@ ENDCLASS
 
 
 CLASS UserTest :=
-    id AS Integer,
+    id AS Integer OR NULL,
     dtSaved AS DateTime,
     ping AS Integer,
     speed AS Integer,
@@ -150,7 +169,20 @@ CLASS VpnGateServer :=
         RETURN MAX OF KEYS OF this.tests
     ENDMETHOD
 
+    // Exceptions:
+    //  1. {{mismatching config names}}
+    //  2. {{conflicting config IDs}}
     METHOD UpdateWith(server AS VpnGateServer) :=
+        // Updating the `config`...
+        bkpConfig AS VpnConfig <- this.config
+        TRY
+            this.config.UpdateWith(other.config)
+        CATCH {{mismatching config names}} OR {{conflicting config IDs}} DO
+            this.config <- bkpConfig
+            DO {{Re-raise the error}}
+        ENDTRY
+        // Updating the `stats`...
+
         // Looking for name conflict...
         IF this.config.name != server.config.name THEN
             RAISE {{name mismatch error: expected @(this.config.name) got 
@@ -168,12 +200,50 @@ CLASS VpnGateServer :=
         ELSE
             id <- this.config.id
         ENDIF
-        //
-        IF this.GetLastStatDt() > server.GetLastStatDt() THEN
-            RAISE {{chronological order error}}
+        // 
+        bkpStats AS Mapping<DateTime -> OwnerStat> <- this.stats
+        TRY
+            FOR EACH stat IN server.stats DO
+                this.AddStat(stat)
+            ENDFOR
+        CATCH {{any error}} DO
+            this.stats <- bkpStats
+            DO {{Re-raise the error}}
+        ELSE
+            this.id <- id
+        ENDTRY
+    ENDMETHOD
+
+    METHOD AddTimely<T>(
+            item AS T,
+            mp_dt_item AS Mapping<DateTime -> T>,
+            ) :=
+        slt AS SoretdList<DateTime> <- NEW SoretdList(KEYS OF mp_dt_item)
+        idx AS Integer <- DO {{Find insertion index of @stat.tsSaved into
+            @slt before possibly equal values}}
+        prevMrgTest AS Boolean <- TRUE
+        nextMrgTest AS Boolean <- TRUE
+        existTest AS Boolean <- TRUE
+        IF {{@idx indicates as the first element}} THEN
+            prevMrgTest <- FALSE
+        ELSE IF {{@idx indicates after the last element (LAST + 1)}} THEN
+            nextMrgTest <- FALSE
+            existTest <- FALSE
         ENDIF
-        this.config.UpdateWith(server.config)
-        DO {{Extend @this.stats with @server.stats. Override on collide.}}
+        // Checking if the timestamp already exists...
+        IF existTest THEN
+            IF slt[idx] = stat.tsSaved THEN
+                IF NOT stat.EqualsButIdTs(slt[idx]) THEN
+                    RAISE {{different metrics at the same timestamp}}
+                ENDIF
+            ENDIF
+        ENDIF
+        // Inserting if the stat is an NOT the same as chronologically
+        // previous and/or next stats...
+        IF NOT ((prevMrgTest AND stat.EqualsButIdTs(slt[idx - 1])) OR (
+                nextMrgTest AND stat.EqualsButIdTs(slt[idx]))) THEN
+            this.stats[stat.tsSaved] <- stat
+        ENDIF
     ENDMETHOD
 
     // Adds a `OwnerStat` to this `VpnGateServer`. If the same statistics
@@ -256,7 +326,7 @@ INTERFACE IVpnGateableDb :=
         {{Creates an empty database with the necessary tables and columns
         at the specified file system path.}}
     ENDFUNCTION
-    METHOD connectDb(path AS FsPath) := 
+    METHOD NEW(path AS FsPath) := 
         {{connects to a database file on the file system}}
     ENDMETHOD
     METHOD CheckDb() -> Boolean :=
@@ -267,20 +337,27 @@ INTERFACE IVpnGateableDb :=
         {{Specifies whether a server with the provided name exists in
         the database or not.}}
     ENDMETHOD
-    METHOD Select(server_name AS String) -> VpnGateServer OR NULL := 
+    METHOD ReadServer(server_name AS String) -> VpnGateServer OR NULL := 
         {{Returns information associated @server_name name in the database
         as an @VpnGateServer object. Returns @NULL if the name
         doesn't exist.}}
     ENDMETHOD
+    METHOD ReadAllServers() -> Tuple<VpnGateServer...> :=
+        {{Reads information for all servers in the database. If the table
+        is empty, it returns an empty tuple.}}
+    ENDMETHOD
     METHOD UpsertServer(server AS VpnGateServer) := 
-        {{Inserts a new server in the database using the provided object.
+        {{Inserts @server into the database if @server.id is null, otherwise
+        updates the server.
+            Inserts a new server in the database using the provided object.
         If a server with the same name already exists in the database, it
         updates the configuration of and adds a new stats record to the
-        server .}}
+        server.}}
     ENDMETHOD
-    METHOD Delete(server_name AS String) :=
+    METHOD DeleteServer(server_name AS String) :=
         {{Deletes all the information associated with the server named
-        @server_name. It does nothing, if no such server exists.}}
+        @server_name from all tables. It does nothing, if no such server
+        exists.}}
     ENDMETHOD
     METHOD Close() := {{closes the database connection}} ENDMETHOD
 ENDINTERFACE
