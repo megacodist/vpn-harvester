@@ -15,25 +15,59 @@ ENDCONCEPT
 CLASS VpnGateManager :=
     db AS IVpnGateableDb,
     mpNameServer AS Mapping<String -> VpnGateServer>,
-    delServerNames AS List<String...>,
-    updServerNames AS List<String...>,
+    delServerNames AS Set<String>,
+    updServerNames AS Set<String>,
 
     METHOD NEW(db AS IVpnGateableDb) :=
         this.db <- db
         this.mpNameServer <- NEW Mapping()
-        this.delServerNames <- NEW List()
+        this.delServerNames <- NEW Set()
+        this.updServerNames <- NEW Set()
     ENDMETHOD
-    METHOD ReadDb() :=
+
+    METHOD ResetServersFromDb() :=
         servers AS Tuple<VpnGateServer...> <- this.db.ReadAllServers()
+        DO {{Empty @mpNameServer, @delServerNames, and @updServerNames}}
         FOR EACH server IN servers DO
             this[server.name] <- server
         ENDFOR
     ENDMETHOD
+
+    // Exceptions:
+    //  1. {{unsupported headings}}: the headings of the CSV text is not
+    //      recognized.
     METHOD ReadUrl(url AS String) :=
-        text As String <- DO {{Read the text resource at @url}}
-        csvData AS VpnGateCsvData <- ParseVpnGateData(text)
+        // Declaring variables ----------------------
+        text As String
+        server AS VpnGateServer
+        updated AS Boolean
+        csvData AS VpnGateCsvData
+        servers AS List<VpnGateServer>
+        // Functionality ----------------------------
+        text <- DO {{Read the text resource at @url}}
+        csvData <- ParseVpnGateData(text)
+        servers <- NEW List()
+        badHeadings <- FALSE
         FOR EACH row IN csvData.data DO
-            .
+            server <- VpnGateServer(csvData.headings, row)
+            APPEND server TO servers
+        ENDFOR
+        FOR EACH server IN servers DO
+            IF server.name IN this.mpNameServer THEN
+                TRY
+                    updated <- this.mpNameServer[server.name].UpdateWith(
+                        server)
+                CATCH {{any error}} DO
+                    DO {{Log the error}}
+                    CONTINUE
+                ELSE
+                    IF updated THEN
+                        DO {{Add @server.name to @updServerNames}}
+                    ENDIF
+                ENDTRY
+            ELSE
+                this.mpNameServer[server.name] <- server
+            ENDIF
         ENDFOR
     ENDMETHOD
     METHOD DelServer(server_name AS String) :=
@@ -44,6 +78,17 @@ CLASS VpnGateManager :=
         ELSE
             APPEND server_name TO delServerNames
         ENDTRY
+    ENDMETHOD
+
+    METHOD SaveChanges() :=
+        FOR EACH name IN this.updServerNames DO
+            this.db.UpsertServer(this.mpNameServer[name])
+        ENDFOR
+        FOR EACH name IN this.delServerNames DO
+            this.db.DeleteServer(name)
+        ENDFOR
+        // Clear the tracking sets after commit
+        DO {{Empty @updServerNames and @delServerNames}}
     ENDMETHOD
 ENDCLASS
 

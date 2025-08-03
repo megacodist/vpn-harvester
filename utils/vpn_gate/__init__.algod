@@ -14,8 +14,8 @@ CLASS CsvBase :=
     ENDFUNCTION
 
     // Exceptions:
-    //  * heading not found: at least one of the headings
-    METHOD NEW(
+    //  * {{heading not found}}: at least one of the headings
+    FUNCTION FromCsv(
             headings AS Tuple<String...>,
             values AS Tuple<String...>,
             ) :=
@@ -43,7 +43,7 @@ CLASS CsvBase :=
         // Creating an object from CSV parsed data, causes `id` to be
         // `NULL`...
         this.id <- NULL
-    ENDMETHOD
+    ENDFUNCTION
 ENDCLASS
 
 
@@ -59,12 +59,15 @@ CLASS VpnConfig INHERITS CsvBase :=
     operatorName AS String,
     operatorMsg AS String,
 
+    // Updates this value by use of attributes of `other` value abd returns
+    // a Boolean value specifying whether any change made.
     // Exceptions:
     //  1. {{mismatching config names}}: this and other `VpnConfig` values
     //      have different names.
     //  2. {{conflicting config IDs}}: this and other `VpnConfig` values
     //      have different non-null integers.
-    METHOD UpdateWith(other AS VpnConfig) :=
+    METHOD UpdateWith(other AS VpnConfig) -> Boolean :=
+        updated AS Boolean <- FALSE
         // Looking for name mismatch...
         IF this.name != other.name THEN
             RAISE {{mismatching config names: expected @(this.name) got 
@@ -74,17 +77,37 @@ CLASS VpnConfig INHERITS CsvBase :=
         IF other.id != NULL THEN
             IF this.id = NULL THEN
                 this.id <- other.id
+                updated <- TRUE
             ELSE
                 RAISE {{conflicting config IDs: @(this.id) and @(other.id)}}
             ENDIF
         ENDIF
         // Updating non-identifying attributes...
-        this.countryCode <- other.countryCode
-        this.countryName <- other.countryName
-        this.ip <- other.ip
-        this.logType <- other.logType
-        this.operatorName <- other.operatorName
-        this.operatorMsg <- other.operatorMsg
+        IF this.countryCode != other.countryCode THEN
+            this.countryCode <- other.countryCode
+            updated <- TRUE
+        ENDIF
+        IF this.countryName != other.countryName THEN
+            this.countryName <- other.countryName
+            updated <- TRUE
+        ENDIF
+        IF this.ip != other.ip THEN
+            this.ip <- other.ip
+            updated <- TRUE
+        ENDIF
+        IF this.logType != other.logType THEN
+            this.logType <- other.logType
+            updated <- TRUE
+        ENDIF
+        IF this.operatorName != other.operatorName THEN
+            this.operatorName <- other.operatorName
+            updated <- TRUE
+        ENDIF
+        IF this.operatorMsg != other.operatorMsg THEN
+            this.operatorMsg <- other.operatorMsg
+            updated <- TRUE
+        ENDIF
+        RETURN updated
     ENDMETHOD
 ENDCLASS
 
@@ -136,27 +159,56 @@ CLASS VpnGateServer :=
         RETURN VpnConfig.GetHeadings() UNION OwnerStat.GetHeadings()
     ENDFUNCTION
 
+    // Exceptions:
+    //  1. {{different stat at the same timestamp}}
+    //  2. {{different test at the same timestamp}}
     METHOD NEW(
             config AS VpnConfig,
             stats AS IIterable<OwnerStat> OR NULL <- NULL,
             tests AS IIterable<UserTest> OR NULL <- NULL,
             ) :=
-        // Initializing the `config`...
         this.config <- config
-        // Initializing the `stats`...
         this.stats <- NEW Mapping() // An empty mapping
+        this.tests <- NEW Mapping() // An empty mapping
+        // Adding `stats`...
         IF stats != NULL THEN
             FOR EACH stat IN stats DO
-                this.stats[stat.dtSaved] <- stat
+                TRY
+                    this.AddStat(stat)
+                CATCH {{stat chronologically existed}} DO
+                    CONTINUE
+                ENDTRY
             ENDFOR
         ENDIF
-        // Initializing the `tests`...
-        this.tests <- NEW Mapping() // An empty mapping
+        // Adding `tests`...
         IF tests != NULL THEN
             FOR EACH test IN tests DO
-                this.tests[test.dtSaved] <- test
+                this.AddTest(test)
             ENDFOR
         ENDIF
+    ENDMETHOD
+
+    // Exceptions:
+    //  1. {{unsupported headings}}
+    //  2. {{different stat at the same timestamp}}
+    //  3. {{different test at the same timestamp}}
+    METHOD NEW(
+            headings AS Tuple<String...>,
+            values AS Tuple<String...>,
+            ) :=
+        // Creating the config...
+        TRY
+            config AS VpnConfig <- VpnConfig.FromCsv(headings, values)
+        CATCH {{heading not found}} DO
+            RAISE {{unsupported headings}}
+        ENDTRY
+        // Creating the stat...
+        TRY
+            stat AS OwnerStat <- OwnerStat.FromCsv(headings, values)
+        CATCH {{heading not found}} DO
+            RAISE {{unsupported headings}}
+        ENDTRY
+        RETURN NEW(config, stats <- (stat,))
     ENDMETHOD
 
     // Gets the timestamp of the most recent `OwnerStat`.
@@ -169,88 +221,55 @@ CLASS VpnGateServer :=
         RETURN MAX OF KEYS OF this.tests
     ENDMETHOD
 
+    // Updates this `VpnGateServer` value with the provided value and
+    // returns a Boolean value specifying whether any change made.
     // Exceptions:
     //  1. {{mismatching config names}}
     //  2. {{conflicting config IDs}}
+    //  3. {{different stat at the same timestamp}}
+    //  4. {{different test at the same timestamp}}
     METHOD UpdateWith(server AS VpnGateServer) :=
+        updated AS Boolean <- FALSE
         // Updating the `config`...
         bkpConfig AS VpnConfig <- this.config
         TRY
-            this.config.UpdateWith(other.config)
+            updated <- this.config.UpdateWith(other.config)
         CATCH {{mismatching config names}} OR {{conflicting config IDs}} DO
             this.config <- bkpConfig
             DO {{Re-raise the error}}
         ENDTRY
         // Updating the `stats`...
-
-        // Looking for name conflict...
-        IF this.config.name != server.config.name THEN
-            RAISE {{name mismatch error: expected @(this.config.name) got 
-                @(server.config.name)}}
-        ENDIF
-        // Looking for ID conflict...
-        id AS Integer OR NULL
-        IF server.config.id != NULL THEN
-            IF this.config.id = NULL THEN
-                id <- server.config.id
-            ELSE
-                RAISE {{conflicting IDs: @(this.config.id) and
-                    @(server.config.id)}}
-            ENDIF
-        ELSE
-            id <- this.config.id
-        ENDIF
-        // 
         bkpStats AS Mapping<DateTime -> OwnerStat> <- this.stats
-        TRY
-            FOR EACH stat IN server.stats DO
+        FOR EACH stat IN other.stats DO
+            TRY
                 this.AddStat(stat)
-            ENDFOR
-        CATCH {{any error}} DO
-            this.stats <- bkpStats
-            DO {{Re-raise the error}}
-        ELSE
-            this.id <- id
-        ENDTRY
+                updated <- TRUE
+            CATCH {{different stat at the same timestamp}} DO
+                this.stats <- bkpStats
+                DO {{Re-raise the error}}
+            CATCH {{stat chronologically existed}} DO
+                CONTINUE
+            ENDTRY
+        ENDFOR
+        // Updating the `tests`...
+        bkpTests AS Mapping<DateTime -> UserTest> <- this.tests
+        FOR EACH test IN this.tests DO
+            TRY
+                this.AddTest(test)
+                updated <- TRUE
+            CATCH {{different test at the same timestamp}} DO
+                this.tests <- bkpTests
+                DO {{Re-raise the error}}
+            ENDTRY
+        ENDFOR
+        RETURN updated
     ENDMETHOD
 
-    METHOD AddTimely<T>(
-            item AS T,
-            mp_dt_item AS Mapping<DateTime -> T>,
-            ) :=
-        slt AS SoretdList<DateTime> <- NEW SoretdList(KEYS OF mp_dt_item)
-        idx AS Integer <- DO {{Find insertion index of @stat.tsSaved into
-            @slt before possibly equal values}}
-        prevMrgTest AS Boolean <- TRUE
-        nextMrgTest AS Boolean <- TRUE
-        existTest AS Boolean <- TRUE
-        IF {{@idx indicates as the first element}} THEN
-            prevMrgTest <- FALSE
-        ELSE IF {{@idx indicates after the last element (LAST + 1)}} THEN
-            nextMrgTest <- FALSE
-            existTest <- FALSE
-        ENDIF
-        // Checking if the timestamp already exists...
-        IF existTest THEN
-            IF slt[idx] = stat.tsSaved THEN
-                IF NOT stat.EqualsButIdTs(slt[idx]) THEN
-                    RAISE {{different metrics at the same timestamp}}
-                ENDIF
-            ENDIF
-        ENDIF
-        // Inserting if the stat is an NOT the same as chronologically
-        // previous and/or next stats...
-        IF NOT ((prevMrgTest AND stat.EqualsButIdTs(slt[idx - 1])) OR (
-                nextMrgTest AND stat.EqualsButIdTs(slt[idx]))) THEN
-            this.stats[stat.tsSaved] <- stat
-        ENDIF
-    ENDMETHOD
-
-    // Adds a `OwnerStat` to this `VpnGateServer`. If the same statistics
-    // already exist just before or after the timestamp, it does nothing.
+    // Adds a `OwnerStat` to this `VpnGateServer` value.
     // Exceptions:
-    // 1. `different metrics at the same timestamp`: the timestamp of `stat`
-    //    already exists with different metrics.
+    //  1. {{different stat at the same timestamp}}
+    //  2. {{stat chronologically existed}}: the chronologically previous
+    //      and/or next stat offer the same statistics
     METHOD AddStat(stat AS OwnerStat) :=
         slt AS SoretdList<DateTime> <- NEW SoretdList(KEYS OF this.stats)
         idx AS Integer <- DO {{Find insertion index of @stat.tsSaved into
@@ -267,16 +286,28 @@ CLASS VpnGateServer :=
         // Checking if the timestamp already exists...
         IF existTest THEN
             IF slt[idx] = stat.tsSaved THEN
-                IF NOT stat.EqualsButIdTs(slt[idx]) THEN
-                    RAISE {{different metrics at the same timestamp}}
+                IF NOT item.EqualsButIdTs(slt[idx]) THEN
+                    RAISE {{different stat at the same timestamp}}
                 ENDIF
             ENDIF
         ENDIF
-        // Inserting if the stat is an NOT the same as chronologically
+        // Inserting if the item is an NOT the same as chronologically
         // previous and/or next stats...
-        IF NOT ((prevMrgTest AND stat.EqualsButIdTs(slt[idx - 1])) OR (
-                nextMrgTest AND stat.EqualsButIdTs(slt[idx]))) THEN
-            this.stats[stat.tsSaved] <- stat
+        IF (prevMrgTest AND item.EqualsButIdTs(slt[idx - 1])) OR (
+                nextMrgTest AND item.EqualsButIdTs(slt[idx])) THEN
+            RAISE {{stat chronologically existed}}
+        ENDIF
+        this.stats[item.tsSaved] <- item
+    ENDMETHOD
+
+    // Adds a `UserTest` to this `VpnGateServer` object.
+    // Exceptions:
+    // 1. {{different test at the same timestamp}}
+    METHOD AddTest(test AS UserTest) :=
+        IF test.tsSaved IN this.tests THEN
+            RAISE {{different test at the same timestamp: @test.tsSaved}}
+        ELSE
+            this.tests[test.tsSaved] <- test
         ENDIF
     ENDMETHOD
 ENDCLASS
@@ -348,11 +379,7 @@ INTERFACE IVpnGateableDb :=
     ENDMETHOD
     METHOD UpsertServer(server AS VpnGateServer) := 
         {{Inserts @server into the database if @server.id is null, otherwise
-        updates the server.
-            Inserts a new server in the database using the provided object.
-        If a server with the same name already exists in the database, it
-        updates the configuration of and adds a new stats record to the
-        server.}}
+        updates the server.}}
     ENDMETHOD
     METHOD DeleteServer(server_name AS String) :=
         {{Deletes all the information associated with the server named
@@ -374,6 +401,10 @@ CLASS VpnGateCsvData :=
 ENDCLASS
 
 
+// Exceptions:
+//  1. {{format error}}
+//  2. {{bad columns}}: missing some expected columns or unexpected
+//      columns
 FUNCTION ParseVpnGateData(text AS String) -> VpnGateCsvData :=
     lines AS Tuple<String...> <- DO {{remove leading and trailing
         whitespace from @text & split it around newline characters}}
@@ -395,20 +426,20 @@ FUNCTION ParseVpnGateData(text AS String) -> VpnGateCsvData :=
     lines[0] = lines[0][1:]  
     // 
     header AS Tuple<String...> <- DO {{parse @lines[0] as CSV}}
-    IF NEW Set(header) != VpnGateServer.MP_HEADING_ATTR THEN
-        RAISE {{unknown columns}}
+    IF NEW Set(header) != VpnGateServer.GetAllHeadings() THEN
+        RAISE {{bad columns}}
     ENDIF
     nCols AS Integer <- LENGTH OF header
     vpnGateData AS VpnGateCsvData <- NEW VpnGateCsvData(nCols)
     vpnGateData.header <- header
     // Parsing the rest of lines...
-    nRowCols AS Integer
+    nRowCols, diff AS Integer
     record AS Tuple<nCols TIMES String>
     dataRows AS Tuple<Tuple<String...>...> <- DO {{parse @lines[1 .. ]
         as CSV}}
     FOR EACH row IN dataRows DO
         nRowCols <- LENGTH OF row
-        diff AS Integer <- nCols - nRowCols
+        diff <- nCols - nRowCols
         IF diff < 0 THEN
             RAISE {{format error: inconsistent column numbers}}
         ELSE IF diff > 0 THEN

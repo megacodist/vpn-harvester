@@ -1,122 +1,432 @@
+# vpn_gate.py
+
+from __future__ import annotations
+import abc
 import csv
-from dataclasses import dataclass
-from datetime import datetime
-import html
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from io import StringIO
+from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
-import sqlite3
-from typing import Iterator, Optional, Protocol
+from typing import Dict, List, Optional, Set, Tuple, Type, TypeVar
+from bisect import bisect_left
+
+# --- Custom Exceptions ---
+
+class VpnGateError(Exception):
+    """Base class for all VPN Gate-related errors in this module."""
+    pass
+
+class HeadingNotFoundError(VpnGateError):
+    """Raised when a required CSV heading is not found."""
+    pass
+
+class FormatError(VpnGateError):
+    """Raised for general CSV format violations."""
+    pass
+    
+class BadColumnsError(VpnGateError):
+    """Raised when CSV columns do not match expected columns."""
+    pass
+
+class MismatchingConfigNamesError(VpnGateError):
+    """Raised when updating configs with different names."""
+    pass
+
+class ConflictingConfigIDsError(VpnGateError):
+    """Raised when updating configs with conflicting non-null IDs."""
+    pass
+
+class DifferentStatAtTimestampError(VpnGateError):
+    """
+    Raised when two `OwnerStat` objects with a different values co-exist
+    at the same timestamp.
+    """
+    pass
+
+class StatChronologicallyExistsError(VpnGateError):
+    """
+    Raised when an identical `OwnerStat` exists chronologically next to the
+    new one. This means the new stat is identical to its chronological
+    neighbors.
+    """
+    pass
+    
+class DifferentTestAtTimestampError(VpnGateError):
+    """
+    Raised when two `UserTest` objects with a different values co-exist
+    at the same timestamp.
+    """
+    pass
+
+
+# --- Type Definitions ---
+IPAddress = IPv4Address | IPv6Address
+T = TypeVar('T', bound='CsvBase')
+_cls_heading_cache: Dict[Type[CsvBase], dict[Tuple[str, ...], dict[str, int]]]
+_cls_heading_cache = {}
+
+# --- Data Models ---
+
+class CsvBase:
+    """Base class for objects that can be created from a CSV row."""
+    MP_HEADING_ATTR: Dict[str, str] = {}
+    id: Optional[int]
+
+    @classmethod
+    def get_headings(cls) -> Set[str]:
+        return set(cls.MP_HEADING_ATTR.keys())
+
+    @classmethod
+    def from_csv(
+            cls: Type[T],
+            headings: Tuple[str, ...],
+            values: Tuple[str, ...],
+            ) -> T:
+        """
+        Factory method to create an instance from a CSV row.
+
+        Raises:
+            `HeadingNotFoundError`
+        """
+        # Obtaining `heading -> index` mapping...
+        if cls not in _cls_heading_cache:
+            _cls_heading_cache[cls] = {}
+        if headings not in _cls_heading_cache[cls]:
+            mp_heading_idx = {}
+            for heading in cls.MP_HEADING_ATTR:
+                try:
+                    idx = headings.index(heading)
+                except ValueError as e:
+                    raise HeadingNotFoundError(
+                        f"Required heading '{heading}' not found in "
+                        "CSV.") from e
+                else:
+                    mp_heading_idx[heading] = idx
+            _cls_heading_cache[cls][headings] = mp_heading_idx
+        mp_heading_idx = _cls_heading_cache[cls][headings]
+        # Preparing attributes for the dataclass constructor...
+        attrs = {}
+        for csv_heading, attr_name in cls.MP_HEADING_ATTR.items():
+            idx = mp_heading_idx[csv_heading]
+            attrs[attr_name] = values[idx] if idx < len(values) else ""
+        # Creating the instance...
+        instance = cls(**attrs)
+        instance.id = None
+        return instance
+
+@dataclass
+class VpnConfig(CsvBase):    
+    name: str
+    country_code: str
+    country_name: str
+    log_type: str
+    operator_name: str
+    operator_message: str
+    ovpn_config_base64: str
+    ip: Optional[IPAddress] = None
+    id: Optional[int] = None
+
+    MP_HEADING_ATTR: Dict[str, str] = {
+        'HostName': 'name',
+        'CountryShort': 'country_code',
+        'CountryLong': 'country_name',
+        'IP': 'ip',
+        'LogType': 'log_type',
+        'Operator': 'operator_name',
+        'Message': 'operator_message',
+        'OpenVPN_ConfigData_Base64': 'ovpn_config_base64'}
+
+    def __post_init__(self):
+        # Convert IP string to IPAddress object after initialization
+        try:
+            self.ip = ip_address(self.ip) if isinstance(self.ip, str) \
+                else self.ip
+        except ValueError:
+            self.ip = None # Handle invalid IP strings gracefully
+
+    def update_with(self, other: VpnConfig) -> bool:
+        """
+        Updates this config with another one. Returns `True` if updated.
+
+        Raises:
+            `MismatchingConfigNamesError` if names differ.
+            `ConflictingConfigIDsError` if IDs are different integers.
+        """
+        updated = False
+        if self.name != other.name:
+            raise MismatchingConfigNamesError(
+                f"Expected name '{self.name}', got '{other.name}'")
+        if other.id is not None:
+            if self.id is None:
+                self.id = other.id
+                updated = True
+            elif self.id != other.id:
+                raise ConflictingConfigIDsError(
+                    f"Conflicting IDs: {self.id} and {other.id}")
+        # Updating other attributes if they differ...
+        for attr in (set(self.MP_HEADING_ATTR.values()) - {'name', 'id'}):
+            selfAttr = getattr(self, attr)
+            otherAttr = getattr(other, attr)
+            if selfAttr != otherAttr:
+                setattr(self, attr, otherAttr)
+                updated = True
+        return updated
+
+@dataclass
+class OwnerStat(CsvBase):
+    score: int
+    ping: int
+    speed: int
+    num_vpn_sessions: int
+    uptime: int
+    total_users: int 
+    dt_saved: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc))
+    id: Optional[int] = None
+
+    MP_HEADING_ATTR: Dict[str, str] = {
+        'Score': 'score',
+        'Ping': 'ping',
+        'Speed': 'speed',
+        'NumVpnSessions': 'num_vpn_sessions',
+        'Uptime': 'uptime',
+        'TotalUsers': 'total_users',
+        'TotalTraffic': 'total_traffic',}
+
+    def __post_init__(self):
+        # Type conversions
+        for attr in self.MP_HEADING_ATTR.values():
+            val = getattr(self, attr)
+            if isinstance(val, str):
+                setattr(self, attr, int(val) if val.isdigit() else 0) 
+                setattr(self, attr, int(val) if val.isdigit() else 0)
+    def equals_but_id_ts(self, other: 'OwnerStat') -> bool:
+        """Checks equality on all fields except `id` and `dt_saved`."""
+        return all(
+            getattr(self, attr) == getattr(other, attr)
+            for attr in self.MP_HEADING_ATTR.values())
 
 
 @dataclass
-class VpnGateData:
+class UserTest:
+    ping: int
+    speed: int
+    dt_saved: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc))
+
+@dataclass
+class VpnGateServer:
+    config: VpnConfig
+    stats: Dict[datetime, OwnerStat] = field(default_factory=dict)
+    tests: Dict[datetime, UserTest] = field(default_factory=dict)
+    
+    @staticmethod
+    def get_all_headings() -> Set[str]:
+        """
+        Returns a set of all headings used in this class.
+        """
+        return VpnConfig.get_headings().union(OwnerStat.get_headings())
+
+    @classmethod
+    def from_csv_row(
+            cls,
+            headings: Tuple[str, ...],
+            values: Tuple[str, ...],
+            ) -> VpnGateServer:
+        try:
+            config = VpnConfig.from_csv(headings, values)
+            stat = OwnerStat.from_csv(headings, values)
+        except HeadingNotFoundError as e:
+            raise BadColumnsError(
+                "CSV row is missing required headings.") from e
+        return cls(config, stats={stat.dt_saved: stat})
+
+    def get_last_stat_dt(self) -> Optional[datetime]:
+        return max(self.stats.keys()) if self.stats else None
+
+    def get_last_test_dt(self) -> Optional[datetime]:
+        return max(self.tests.keys()) if self.tests else None
+
+    def update_with(self, other: VpnGateServer) -> bool:
+        """
+        Updates this server with another one. Returns `True` if updated.
+
+        Raises:
+            `MismatchingConfigNamesError`:
+                if config names differ.
+            `ConflictingConfigIDsError`:
+                if config IDs are different integers.
+        """
+        # Updating the config...
+        bkpConfig: VpnConfig = self.config
+        try:
+            updated = self.config.update_with(other.config)
+        except (MismatchingConfigNamesError, ConflictingConfigIDsError) as e:
+            # If config update fails, restore the original config
+            self.config = bkpConfig
+            raise e
+        # Adding new stats...
+        bkpStats = self.stats.copy()
+        for stat in other.stats.values():
+            try:
+                self.add_stat(stat)
+                updated = True
+            except (DifferentStatAtTimestampError,
+                        StatChronologicallyExistsError) as err:
+                self.stats = bkpStats  # Restore stats on error
+                raise err
+        # Adding new tests...
+        bkpTests = self.tests.copy()
+        for test in other.tests.values():
+            try:
+                self.add_test(test)
+                updated = True
+            except DifferentTestAtTimestampError:
+                continue
+        # If we reach here, all updates were successful
+        return updated
+
+    def add_stat(self, stat: OwnerStat):
+        """
+        Adds a new stat to the server. If a stat with the same timestamp
+        already exists, it checks if they are identical (except for ID and
+        timestamp).
+
+        Raises:
+            `DifferentStatAtTimestampError` if a different stat exists at the
+                same timestamp.
+            `StatChronologicallyExistsError` if the new stat is identical to
+                its chronological neighbors.
+        """
+        sorted_keys = sorted(self.stats.keys())
+        idx = bisect_left(sorted_keys, stat.dt_saved)
+        # Checking for existing stat at the same timestamp...
+        if idx < len(sorted_keys) and sorted_keys[idx] == stat.dt_saved:
+            if not self.stats[sorted_keys[idx]].equals_but_id_ts(stat):
+                raise DifferentStatAtTimestampError(
+                    f"Different stat exists at {stat.dt_saved}")
+            return # It's the same, do nothing
+        # Check if the new stat is identical to its chronological neighbors
+        prev_stat_same = False
+        if idx > 0:
+            prev_stat_same = self.stats[
+                sorted_keys[idx - 1]].equals_but_id_ts(stat)
+        next_stat_same = False
+        if idx < len(sorted_keys):
+            next_stat_same = self.stats[sorted_keys[idx]].equals_but_id_ts(
+                stat)
+        if prev_stat_same or next_stat_same:
+            raise StatChronologicallyExistsError(
+                "Stat is identical to its neighbor(s).")
+        self.stats[stat.dt_saved] = stat
+
+    def add_test(self, test: UserTest):
+        """
+        Adds a new test to the server.
+
+        Raises:
+            `DifferentTestAtTimestampError`:
+                if a different test exists at the same timestamp.
+        """
+        if test.dt_saved in self.tests and self.tests[test.dt_saved] != test:
+            raise DifferentTestAtTimestampError(
+                f"Different test exists at {test.dt_saved}")
+        self.tests[test.dt_saved] = test
+
+# --- Database Interface ---
+
+class IVpnGateableDb(abc.ABC):
     """
-    A container for VPN Gate CSV data, separating headers from data rows.
-    This class is used to encapsulate the parsed CSV data from VPN Gate.
-    Attributes:
-        headers (tuple[str, ...]): The header row of the CSV.
-        rows (list[tuple[str, ...]]): The data rows of the CSV.
+    This interface is supposed to work with a database containing the
+    following tables:
+        CREATE TABLE IF NOT EXISTS vpn_config (
+            config_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name VARCHAR(255) NOT NULL UNIQUE,
+            ip VARCHAR(45),
+            country_code VARCHAR(10) NOT NULL,
+            country_name VARCHAR(255) NOT NULL,
+            log_type             VARCHAR(255),
+            operator_name        TEXT,
+            operator_message     TEXT,
+            ovpn_config_base64   TEXT
+        );
+        CREATE TABLE IF NOT EXISTS owner_stat (
+            stat_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_id            INTEGER NOT NULL,
+            saved_ts            TIMESTAMP NOT NULL,
+            score                BIGINT,
+            ping_ms              INTEGER,
+            speed_bps            BIGINT,
+            num_vpn_sessions     INTEGER,
+            uptime_ms            BIGINT,
+            total_users          BIGINT,
+            total_traffic_bytes  BIGINT,
+            UNIQUE (config_id, saved_ts),
+            FOREIGN KEY (config_id) REFERENCES vpn_config(config_id)
+                ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS user_test (
+            test_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            config_id            INTEGER NOT NULL,
+            saved_ts            TIMESTAMP NOT NULL,
+            ping_ms              INTEGER,
+            speed_bps            BIGINT,
+            UNIQUE (config_id, saved_ts),
+            FOREIGN KEY (config_id) REFERENCES vpn_config(config_id)
+                ON DELETE CASCADE
+        );
     """
-    header: tuple[str, ...]
-    rows: list[tuple[str, ...]]
+    @staticmethod
+    @abc.abstractmethod
+    def create_empty_db(path: Path):
+        """Creates an empty database at the specified path."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def __init__(self, path: Path):
+        """Connects to a database file."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def check_db(self) -> bool:
+        """Checks if the connected database has the necessary structure."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def read_server(self, server_name: str) -> Optional[VpnGateServer]:
+        """Reads a single server by name."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def read_all_servers(self) -> Tuple[VpnGateServer, ...]:
+        """Reads all servers from the database."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def upsert_server(self, server: VpnGateServer):
+        """Inserts or updates a server and its related stats/tests."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def delete_server(self, server_name: str):
+        """Deletes a server by name."""
+        raise NotImplementedError
+        
+    @abc.abstractmethod
+    def close(self):
+        """Closes the database connection."""
+        raise NotImplementedError
+
+# --- CSV Data Structures and Parser ---
+
+@dataclass
+class VpnGateCsvData:
+    header: Tuple[str, ...]
+    rows: List[Tuple[str, ...]]
 
 
-class Ovpn:
-    def __init__(
-            self,
-            hostName: str,
-            ip: str,
-            udpPort: int | None,
-            tcpPort: int | None,
-            ovcUrl: str,
-            downloadedAt: datetime,
-            ) -> None:
-        self.hostName = hostName
-        self.ip = ip
-        self.udpPort = udpPort
-        self.tcpPort = tcpPort
-        self.ovcUrl = ovcUrl
-        self.downloadedAt = downloadedAt
-
-
-class IVpnGateableDb(Protocol):
-    def connect(self, path: Path) -> None: ...
-    def select(self, hostName: str) -> Optional[Ovpn]: ...
-    def update(self, ovpn: Ovpn) -> None: ...
-    def insert(self, ovpn: Ovpn) -> None: ...
-    def close(self) -> None: ...
-
-
-class SqliteDb(IVpnGateableDb): 
-    def __init__(self):
-        self._conn: sqlite3.Connection | None = None
-
-    def connect(self, path: Path) -> None:
-        self._conn = sqlite3.connect(path)
-        cursor = self._conn.cursor()
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ovpn (
-            host_name TEXT PRIMARY KEY,
-            ip TEXT,
-            udp_port INTEGER,
-            tcp_port INTEGER,
-            ovc_url TEXT,
-            downloaded_at TEXT
-        )
-        ''')
-        self._conn.commit()
-
-    def select(self, hostName: str) -> Optional[Ovpn]:
-        """
-        Select an OVPN entry by host name. Raises `RuntimeError` if the
-        database connection has not been established.
-        """
-        if self._conn is None:
-            raise RuntimeError(
-                "Database connection has not been established.")
-        cursor = self._conn.cursor()
-        cursor.execute('SELECT ip, udp_port, tcp_port, ovc_url, downloaded_at FROM ovpn WHERE host_name = ?', (hostName,))
-        row = cursor.fetchone()
-        if row:
-            return Ovpn(hostName, row[0], row[1], row[2], row[3], datetime.fromisoformat(row[4]))
-        return None
-
-    def update(self, ovpn: Ovpn) -> None:
-        """
-        Update an existing OVPN entry in the database. Raises `RuntimeError`
-        if the database connection has not been established.
-        """
-        if self._conn is None:
-            raise RuntimeError(
-                "Database connection has not been established.")
-        cursor = self._conn.cursor()
-        cursor.execute(
-            'UPDATE ovpn SET ip=?, udp_port=?, tcp_port=?, ovc_url=?, downloaded_at=? WHERE host_name=?',
-            (ovpn.ip, ovpn.udpPort, ovpn.tcpPort, ovpn.ovcUrl, ovpn.downloadedAt.isoformat(), ovpn.hostName)
-        )
-        self._conn.commit()
-
-    def insert(self, ovpn: Ovpn) -> None:
-        """
-        Insert a new OVPN entry into the database. Raises `RuntimeError`
-        if the database connection has not been established.
-        """
-        if self._conn is None:
-            raise RuntimeError(
-                "Database connection has not been established.")
-        cursor = self._conn.cursor()
-        cursor.execute(
-            'INSERT INTO ovpn (host_name, ip, udp_port, tcp_port, ovc_url, downloaded_at) VALUES (?, ?, ?, ?, ?, ?)',
-            (ovpn.hostName, ovpn.ip, ovpn.udpPort, ovpn.tcpPort, ovpn.ovcUrl, ovpn.downloadedAt.isoformat())
-        )
-        self._conn.commit()
-
-    def close(self) -> None:
-        if self._conn:
-            self._conn.close()
-
-
-def parseVpnGateCsv(csv_text: str) -> VpnGateData:
+def parseVpnGateCsv(csv_text: str) -> VpnGateCsvData:
     """
     Parses VPN Gate CSV text into a VpnGateData object, handling the specific
     format quirks of the vpngate.net API.
@@ -194,51 +504,4 @@ def parseVpnGateCsv(csv_text: str) -> VpnGateData:
     except csv.Error as e:
         raise TypeError("Malformed CSV text could not be parsed.") from e
     #
-    return VpnGateData(header=tplHeader, rows=processed_rows)
-
-
-def csvObjToHtmlTable(
-        obj: VpnGateData,
-        id: str = "",
-        class_: str = "",
-        ) -> str:
-    """
-    Converts a `VpnGateData` object into an HTML table string.
-
-    Args:
-        obj: The `VpnGateData` object containing the header and rows.
-        id (str, optional): The ID to assign to the <table> element.
-            Defaults to "".
-        class_ (str, optional): The class name(s) to assign to the <table>
-            element. Defaults to "".
-
-    Returns:
-        A string containing the generated HTML table.
-    """
-    # Start building the table tag, adding id and class attributes if provided
-    tableAttrs = []
-    if id:
-        tableAttrs.append(f'id="{html.escape(id)}"')
-    if class_:
-        tableAttrs.append(f'class="{html.escape(class_)}"')
-    
-    tableElem = [f"<table {' '.join(tableAttrs)}>"]
-    # Building the header...
-    tableElem.append("  <thead>")
-    tableElem.append("    <tr>")
-    for header_item in obj.header:
-        tableElem.append(f"      <th>{html.escape(header_item)}</th>")
-    tableElem.append("    </tr>")
-    tableElem.append("  </thead>")
-    # Building the body...
-    tableElem.append("  <tbody>")
-    for row in obj.rows:
-        tableElem.append("    <tr>")
-        for cell in row:
-            tableElem.append(f"      <td>{html.escape(cell)}</td>")
-        tableElem.append("    </tr>")
-    tableElem.append("  </tbody>")
-    # Closing the table...
-    tableElem.append("</table>")
-    # Returning the final HTML string...
-    return "\n".join(tableElem)
+    return VpnGateCsvData(header=tplHeader, rows=processed_rows)
