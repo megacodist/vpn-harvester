@@ -74,8 +74,18 @@ class CsvBase:
     id: Optional[int]
 
     @classmethod
-    def get_headings(cls) -> Set[str]:
+    def get_csv_headings(cls) -> Set[str]:
+        """
+        Returns a set of all expected CSV heading needed for this class.
+        """
         return set(cls.MP_HEADING_ATTR.keys())
+    
+    @classmethod
+    def get_csv_attrs(cls) -> Set[str]:
+        """
+        Returns a set of all attributes populated from the CSV.
+        """
+        return set(cls.MP_HEADING_ATTR.values())
 
     @classmethod
     def from_csv(
@@ -147,7 +157,8 @@ class VpnConfig(CsvBase):
 
     def update_with(self, other: VpnConfig) -> bool:
         """
-        Updates this config with another one. Returns `True` if updated.
+        Updates this config with another one. Returns `True` if any
+        attribute changes, otherwise `False`.
 
         Raises:
             `MismatchingConfigNamesError` if names differ.
@@ -165,7 +176,7 @@ class VpnConfig(CsvBase):
                 raise ConflictingConfigIDsError(
                     f"Conflicting IDs: {self.id} and {other.id}")
         # Updating other attributes if they differ...
-        for attr in (set(self.MP_HEADING_ATTR.values()) - {'name', 'id'}):
+        for attr in (self.get_csv_attrs() - {'name', 'id'}):
             selfAttr = getattr(self, attr)
             otherAttr = getattr(other, attr)
             if selfAttr != otherAttr:
@@ -180,7 +191,8 @@ class OwnerStat(CsvBase):
     speed: int
     num_vpn_sessions: int
     uptime: int
-    total_users: int 
+    total_users: int
+    total_traffic: int
     dt_saved: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc))
     id: Optional[int] = None
@@ -210,6 +222,7 @@ class OwnerStat(CsvBase):
 
 @dataclass
 class UserTest:
+    id: int | None
     ping: int
     speed: int
     dt_saved: datetime = field(
@@ -226,7 +239,7 @@ class VpnGateServer:
         """
         Returns a set of all headings used in this class.
         """
-        return VpnConfig.get_headings().union(OwnerStat.get_headings())
+        return VpnConfig.get_csv_headings().union(OwnerStat.get_csv_headings())
 
     @classmethod
     def from_csv_row(
@@ -234,6 +247,19 @@ class VpnGateServer:
             headings: Tuple[str, ...],
             values: Tuple[str, ...],
             ) -> VpnGateServer:
+        """
+        Factory method to create a `VpnGateServer` instance from a CSV row.
+
+        Args:
+            headings: A tuple of CSV headings.
+            values: A tuple of CSV values.
+
+        Returns:
+            A `VpnGateServer` instance.
+    
+        Raises:
+            `HeadingNotFoundError`:
+        """
         try:
             config = VpnConfig.from_csv(headings, values)
             stat = OwnerStat.from_csv(headings, values)
