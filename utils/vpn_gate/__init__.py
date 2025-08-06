@@ -406,7 +406,12 @@ class IVpnGateableDb(abc.ABC):
     @staticmethod
     @abc.abstractmethod
     def create_empty_db(path: Path):
-        """Creates an empty database at the specified path."""
+        """
+        Creates an empty database with the necessary tables at the path:
+        * It will create the file if the it doesn't exist, or
+        * It will clear the file if the file already exists,.
+        An then tables will be created.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
@@ -416,27 +421,40 @@ class IVpnGateableDb(abc.ABC):
 
     @abc.abstractmethod
     def check_db(self) -> bool:
-        """Checks if the connected database has the necessary structure."""
+        """
+        Checks if the connected database has the necessary tables and columns.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
-    def read_server(self, server_name: str) -> Optional[VpnGateServer]:
-        """Reads a single server by name."""
+    def read_server(self, server_name: str) -> VpnGateServer | None:
+        """
+        Reads a single server and its related data by its unique name.
+        Returns `None` if nothing found.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     def read_all_servers(self) -> Tuple[VpnGateServer, ...]:
-        """Reads all servers from the database."""
+        """
+        Reads all servers, stats, and tests from the database.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     def upsert_server(self, server: VpnGateServer):
-        """Inserts or updates a server and its related stats/tests."""
+        """
+        Automatically inserts or updates a server into the database. If
+        inserted, it sets the ID of the server's config with the generated
+        ID from database.
+        """
         raise NotImplementedError
 
     @abc.abstractmethod
     def delete_server(self, server_name: str):
-        """Deletes a server by name."""
+        """
+        Deletes a server by name and any related stats and tests.
+        """
         raise NotImplementedError
         
     @abc.abstractmethod

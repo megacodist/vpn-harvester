@@ -9,7 +9,7 @@ csv.field_size_limit(10_000_000)
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from utils.vpn_gate import parseVpnGateCsv, VpnGateData, Ovpn, IVpnGateableDb, SqliteDb
+from utils.vpn_gate import parseVpnGateCsv, IVpnGateableDb, VpnGateCsvData
 
 
 # Configuration
@@ -50,7 +50,7 @@ def slugify(text: str, delim: str = "-") -> str:
     return delim.join(filtered_parts)
 
 
-def saveOvpnFiles(dir_: Path, vpnGateData: VpnGateData) -> None:
+def saveOvpnFiles(dir_: Path, vpnGateData: VpnGateCsvData) -> None:
     # Getting the index of host name column...
     try:
         idxHostName = vpnGateData.header.index('HostName')
@@ -92,7 +92,7 @@ def saveOvpnFiles(dir_: Path, vpnGateData: VpnGateData) -> None:
 
 
 def renderHtmlFromCsv(
-        csv: VpnGateData,
+        csv: VpnGateCsvData,
         template_path: Path,
         output_path: Path,
         ) -> None:
@@ -110,59 +110,10 @@ def renderHtmlFromCsv(
 
 
 def main() -> None:
+    from widgets import VpnHarvesterApp
     #
-    from utils.inet import fetchTextRes
-    INPUT_PRMPT = (
-        "\nEnter a source for the CSV data:\n"
-        "- A file path (e.g., /path/to/data.csv)\n"
-        "- A URL (e.g., https://example.com/data.csv)\n"
-        "- Nothing to use the default VPN Gate list\n"
-        "> ")
-    DEFAULT_URL = 'http://www.vpngate.net/api/iphone/'
-    # Looping until valid input is received...
-    urlReqstd: bool = False
-    text: str = ""
-    while True:
-        try:
-            pathUrl: str = input(INPUT_PRMPT).strip()
-            # Determining the choice...
-            if not pathUrl:
-                pathUrl = DEFAULT_URL
-                urlReqstd = True
-            else:
-                path = Path(pathUrl)
-                if path.is_file():
-                    print(f'Reading CSV data from file: {path}')
-                    urlReqstd = False
-                    text = path.read_text(encoding='utf-8')
-                else:
-                    urlReqstd = True
-            if urlReqstd:
-                print(f'Fetching CSV data from URL: {pathUrl}')
-                text = fetchTextRes(pathUrl)
-            if text:
-                break
-        except KeyboardInterrupt:
-            sys.exit(0)
-        except Exception as e:
-            print(f"Error: {e}")
-            continue
-    #
-    print(f'Parsing CSV data...')
-    try:
-        csvData: VpnGateData = parseVpnGateCsv(text)
-    except Exception as err:
-        print(f'Error parsing CSV data: {err}')
-        sys.exit(1)
-    if not csvData.rows:
-        print('No valid data found in the CSV.')
-        sys.exit(1)
-    renderHtmlFromCsv(
-        csvData,
-        APP_DIR / 'vpn-gate-report.j2',
-        APP_DIR / 'vpn-gate-report.html')
-    saveOvpnFiles(OVPNS_DIR, csvData)
-    print('Done.')
+    vpnHarvesterApp = VpnHarvesterApp()
+    vpnHarvesterApp.mainloop()
 
 
 if __name__ == '__main__':

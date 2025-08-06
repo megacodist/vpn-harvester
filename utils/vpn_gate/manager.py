@@ -59,10 +59,24 @@ class VpnGateSqlite(IVpnGateableDb):
     @staticmethod
     def create_empty_db(path: Path):
         """
-        Creates an empty database with the necessary tables at the path:
-        * If the file doesn't exist, it will be created.
-        * If the file already exists, it will not modify it.
+        Ensures a fresh, empty database with the correct schema exists at
+        the path:
+
+        - If the file already exists at the path, it will be DELETED. And a
+        new, empty database file is then created.
+        - If the file doesn't exist, it will be created.
+
+        Raises:
+            `OSError`:
+                If the file cannot be deleted or created.
+            `sqlite3.Error`:
+                If there is an error during the creation of the database
+                or schema.
         """
+        # Deleting the file if it exists...
+        if path.exists():
+            path.unlink()
+        # Creating the new database and schema...
         with sqlite3.connect(path) as conn:
             conn.executescript(VpnGateSqlite._CREATE_SCHEMA_SQL)
 
@@ -121,7 +135,7 @@ class VpnGateSqlite(IVpnGateableDb):
 
     def read_all_servers(self) -> tuple[VpnGateServer, ...]:
         """
-        Reads all servers, stats, and tests efficiently from the database.
+        Reads all servers, stats, and tests from the database.
         """
         cursor = self._conn.cursor()
         # 1. Fetching all configs and create `VpnGateServer` objects...
@@ -229,17 +243,7 @@ class VpnGateSqlite(IVpnGateableDb):
         inserted, it sets the ID of the server's config with the generated
         ID from database.
         """
-        stat_insert_sql = """
-            INSERT INTO owner_stat (config_id, saved_ts, score, ping_ms, 
-                                    speed_bps, num_vpn_sessions, uptime_ms, 
-                                    total_users, total_traffic)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        test_insert_sql = """
-            INSERT INTO user_test (config_id, saved_ts, ping_ms, speed_bps)
-            VALUES (?, ?, ?, ?)
-        """
-        # Using transaction, commit on seccess, rollback on error...
+        # Using transaction: commit on seccess, rollback on error...
         with self._conn:
             cursor = self._conn.cursor()
             config = server.config
@@ -255,7 +259,13 @@ class VpnGateSqlite(IVpnGateableDb):
             for stat in server.stats.values():
                 if stat.id is None:
                     cursor.execute(
-                        stat_insert_sql,
+                        """
+                            INSERT INTO owner_stat (
+                                config_id, saved_ts, score, ping_ms, 
+                                speed_bps, num_vpn_sessions, uptime_ms, 
+                                total_users, total_traffic)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
                         (
                             config.id, stat.dt_saved, stat.score, stat.ping,
                             stat.speed, stat.num_vpn_sessions, stat.uptime,
@@ -266,7 +276,11 @@ class VpnGateSqlite(IVpnGateableDb):
             for test in server.tests.values():
                 if test.id is None:
                     cursor.execute(
-                        test_insert_sql,
+                        """
+                            INSERT INTO user_test (
+                                config_id, saved_ts, ping_ms, speed_bps)
+                            VALUES (?, ?, ?, ?)
+                        """,
                         (config.id, test.dt_saved, test.ping, test.speed),)
                     test.id = cursor.lastrowid # Set the ID on the object
 
@@ -388,28 +402,3 @@ class VpnGateManager:
         # Clearing the tracking sets after the changes have been committed...
         self.upd_server_names.clear()
         self.del_server_names.clear()
-
-# --- Main Program Entry Point ---
-
-def main():
-    """Main function for the program."""
-    # This is where you would initialize the database, create the manager,
-    # and run the main application logic.
-    # For example:
-    #
-    # db_path = Path("vpn_gate.db")
-    # if not db_path.exists():
-    #     VpnGateSqlite.create_empty_db(db_path)
-    #
-    # db = VpnGateSqlite(db_path)
-    # manager = VpnGateManager(db)
-    # manager.reset_servers_from_db()
-    # manager.read_from_url("https://www.vpngate.net/api/iphone/")
-    # manager.save_changes()
-    # db.close()
-    
-    pass
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    main()
