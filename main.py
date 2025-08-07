@@ -110,9 +110,9 @@ def renderHtmlFromCsv(
 
 
 def main() -> None:
-    from widgets import VpnHarvesterApp
+    from widgets.vpn_narvester_win import VpnHarvesterWin
     #
-    vpnHarvesterApp = VpnHarvesterApp()
+    vpnHarvesterApp = VpnHarvesterWin()
     vpnHarvesterApp.mainloop()
 
 

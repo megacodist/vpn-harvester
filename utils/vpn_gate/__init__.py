@@ -137,7 +137,7 @@ class VpnConfig(CsvBase):
     ip: Optional[IPAddress] = None
     id: Optional[int] = None
 
-    MP_HEADING_ATTR: Dict[str, str] = {
+    MP_HEADING_ATTR: Dict[str, str] = field(default_factory=lambda: {
         'HostName': 'name',
         'CountryShort': 'country_code',
         'CountryLong': 'country_name',
@@ -145,7 +145,7 @@ class VpnConfig(CsvBase):
         'LogType': 'log_type',
         'Operator': 'operator_name',
         'Message': 'operator_message',
-        'OpenVPN_ConfigData_Base64': 'ovpn_config_base64'}
+        'OpenVPN_ConfigData_Base64': 'ovpn_config_base64'})
 
     def __post_init__(self):
         # Convert IP string to IPAddress object after initialization
@@ -197,14 +197,14 @@ class OwnerStat(CsvBase):
         default_factory=lambda: datetime.now(timezone.utc))
     id: Optional[int] = None
 
-    MP_HEADING_ATTR: Dict[str, str] = {
+    MP_HEADING_ATTR: Dict[str, str] = field(default_factory=lambda:{
         'Score': 'score',
         'Ping': 'ping',
         'Speed': 'speed',
         'NumVpnSessions': 'num_vpn_sessions',
         'Uptime': 'uptime',
         'TotalUsers': 'total_users',
-        'TotalTraffic': 'total_traffic',}
+        'TotalTraffic': 'total_traffic',})
 
     def __post_init__(self):
         # Type conversions
