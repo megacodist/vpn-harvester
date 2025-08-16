@@ -190,4 +190,4 @@ class ServersView(tksheet.Sheet):
     def clear_row_status(self, server_name: str):
         """Removes all custom styling from the row."""
         if server_name in self._mpNameRow:
-            self.dehighlight_rows(self._mpName_row[server_name])```
+            self.dehighlight_rows(self._mpName_row[server_name])

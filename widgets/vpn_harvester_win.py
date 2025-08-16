@@ -3,9 +3,12 @@
 #
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
+
+from utils.settings import VpnGateAppSettings
 
 
 @dataclass
@@ -15,22 +18,46 @@ class VpnGateSettings:
 
 
 class VpnHarvesterWin(tk.Tk):
-    def __init__(self):
+    def __init__(self, settings: VpnGateAppSettings) -> None:
         # Creating the window...
         super().__init__()
         self.title("VPN Gate Connection Tester")
-        self.geometry("1000x800")
-        # Instantiating variables...
-        self.active_threads = []
+        self.geometry(f"{settings.win_width}x{settings.win_height}+"
+            f"{settings.win_x}+{settings.win_y}")
+        # Attributes...
+        self._settings = settings
         # Initializing the GUI...
         self._frm_container = ttk.Frame(self)
         self._frm_container.pack(expand=True, fill='both', padx=5, pady=5)
+        self._pndw_mainHorz: ttk.PanedWindow
+        """
+        The horizontal `PanedWindow` which splits the window into `pndw_l`
+        and `pndw_r` sections.
+        """
+        self._pndw_leftVert: ttk.PanedWindow
+        """
+        The vertical `PanedWindow` for the `pndw_l`, splitting it
+        into `pndw_lt` and `pndw_lb` sections.
+        """
+        self._pndw_btmLeftHorz: ttk.PanedWindow
+        """
+        The horizontal `PanedWindow` for the `pndw_lb` section,
+        splitting it into `pndw_lbl` and `pndw_lbr` sections.
+        """
         self._initMenubar()
         self._initToolbar()
         self._initPanes()
         self._initServersVw()
         self._initStatsVw()
         self._initTestsVw()
+        #
+        self.update()
+        self._pndw_mainHorz.sashpos(0, self._settings.pndw_main_horz)
+        self.update_idletasks()
+        self._pndw_leftVert.sashpos(0, self._settings.pndw_left_vert)
+        self.update_idletasks()
+        self._pndw_btmLeftHorz.sashpos(0, self._settings.pndw_btm_left_horz)
+        self.update_idletasks()
         # Bindings & events...
         self.protocol("WM_DELETE_WINDOW", self._onWinClosing)
     
@@ -82,48 +109,48 @@ class VpnHarvesterWin(tk.Tk):
 
     def _initPanes(self):
         # 1. Creating the top-level horizontal PanedWindow (left vs. right)...
-        pdw_main_hor = ttk.PanedWindow(
+        self._pndw_mainHorz = ttk.PanedWindow(
             self._frm_container,
             orient=tk.HORIZONTAL)
-        pdw_main_hor.pack(fill=tk.BOTH, expand=True)
+        self._pndw_mainHorz.pack(fill=tk.BOTH, expand=True)
         # 2. Creating the vertical PanedWindow for the left side (top vs.
         # bottom)...
-        pdw_left_ver = ttk.PanedWindow(
-            pdw_main_hor,
+        self._pndw_leftVert = ttk.PanedWindow(
+            self._pndw_mainHorz,
             orient=tk.VERTICAL)
         # 3. Creating the final horizontal PanedWindow for the bottom-left
         # area...
-        pdw_btm_hor = ttk.PanedWindow(
-            pdw_left_ver,
+        self._pndw_btmLeftHorz = ttk.PanedWindow(
+            self._pndw_leftVert,
             orient=tk.HORIZONTAL)
         # 4. Creating the actual Labelframe widgets that will act as the
         # panes...
         self._lfrm_servers = ttk.Labelframe(
-            pdw_left_ver,
+            self._pndw_leftVert,
             text="VPN Gate Servers")
         self._lfrm_stats = ttk.Labelframe(
-            pdw_btm_hor,
+            self._pndw_btmLeftHorz,
             text="Owner Statistics")
         self._lfrm_tests = ttk.Labelframe(
-            pdw_btm_hor,
+            self._pndw_btmLeftHorz,
             text="User Tests")
         self._lfrm_msgs = ttk.Labelframe(
-            pdw_main_hor,
+            self._pndw_mainHorz,
             text="Message")
         # 5. Adding the panes to their respective containers from the
         # inside out...
         # 5.a. Adding the stats and tests panes to the bottom-most
         # container...
-        pdw_btm_hor.add(self._lfrm_stats, weight=1)
-        pdw_btm_hor.add(self._lfrm_tests, weight=1)
+        self._pndw_btmLeftHorz.add(self._lfrm_stats, weight=1)
+        self._pndw_btmLeftHorz.add(self._lfrm_tests, weight=1)
         # 5.b. Add the servers pane (top) and the bottom container to the
         # left-side container...
-        pdw_left_ver.add(self._lfrm_servers, weight=3) # Give more vertical space
-        pdw_left_ver.add(pdw_btm_hor, weight=1)
+        self._pndw_leftVert.add(self._lfrm_servers, weight=3) # Give more vertical space
+        self._pndw_leftVert.add(self._pndw_btmLeftHorz, weight=1)
         # 5c. Finally, adding the entire left-side container and the right
         # message box to the main container...
-        pdw_main_hor.add(pdw_left_ver, weight=2) # Give more horizontal space
-        pdw_main_hor.add(self._lfrm_msgs, weight=1)
+        self._pndw_mainHorz.add(self._pndw_leftVert, weight=2) # Give more horizontal space
+        self._pndw_mainHorz.add(self._lfrm_msgs, weight=1)
 
     def _initServersVw(self) -> None:
         pass
@@ -146,5 +173,34 @@ class VpnHarvesterWin(tk.Tk):
     def _checkServer(self) -> None:
         pass
 
+    def _saveGeometry(self) -> None:
+        """Saves the geometry of the window to the app settings object."""
+        import re
+        w_h_x_y = self.winfo_geometry()
+        GEOMETRY_REGEX = r"""
+            (?P<width>\d+)    # The width of the window
+            x(?P<height>\d+)  # The height of the window
+            \+(?P<x>\d+)      # The x-coordinate of the window
+            \+(?P<y>\d+)      # The y-coordinate of the window"""
+        match = re.search(
+            GEOMETRY_REGEX,
+            w_h_x_y,
+            re.VERBOSE)
+        if match:
+            self._settings.win_width = int(match.group('width'))
+            self._settings.win_height = int(match.group('height'))
+            self._settings.win_x = int(match.group('x'))
+            self._settings.win_y = int(match.group('y'))
+        else:
+            logging.error(
+                'Cannot get the geometry of the window.',
+                stack_info=True)
+
     def _onWinClosing(self) -> None:
-        pass
+        self._saveGeometry()
+        #
+        self._settings.pndw_main_horz = self._pndw_mainHorz.sashpos(0)
+        self._settings.pndw_left_vert = self._pndw_leftVert.sashpos(0)
+        self._settings.pndw_btm_left_horz = self._pndw_btmLeftHorz.sashpos(0)
+        #
+        self.destroy()

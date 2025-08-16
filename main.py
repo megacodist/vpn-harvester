@@ -1,6 +1,7 @@
 import binascii
 import csv
 import base64
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -9,14 +10,15 @@ csv.field_size_limit(10_000_000)
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from utils.vpn_gate import parseVpnGateCsv, IVpnGateableDb, VpnGateCsvData
+from utils.vpn_gate import VpnGateCsvData
 
 
 # Configuration
-APP_DIR: Path = Path(__file__).resolve().parent
+_APP_DIR: Path = Path(__file__).resolve().parent
+_SECRET_KEY = b"a-secret-key"
 API_CSV_URL: str = 'http://www.vpngate.net/api/iphone/'
-DB_PATH: Path = APP_DIR / 'ovpns.db'
-OVPNS_DIR: Path = APP_DIR / 'ovpns'
+DB_PATH: Path = _APP_DIR / 'ovpns.db'
+OVPNS_DIR: Path = _APP_DIR / 'ovpns'
 OVPNS_DIR.mkdir(exist_ok=True)
 
 
@@ -88,7 +90,6 @@ def saveOvpnFiles(dir_: Path, vpnGateData: VpnGateCsvData) -> None:
         with open(filepath, 'wb') as f:
             f.write(binBase64)
         print(f"Written {filepath}")
-        
 
 
 def renderHtmlFromCsv(
@@ -110,10 +111,35 @@ def renderHtmlFromCsv(
 
 
 def main() -> None:
-    from widgets.vpn_narvester_win import VpnHarvesterWin
+    # Configuring the logger...
+    from utils.logger import configureLogger
+    configureLogger(_APP_DIR / 'log.log')
+    # Loading application settings...
+    #spinner.start(_('LOADING_SETTINGS'))
+    from megacodist.settings import BadConfigFileError
+    from utils.settings import VpnGateAppSettings
+    settings = VpnGateAppSettings(_SECRET_KEY)
+    pthSett = _APP_DIR / 'config.bin'
+    flSett = pthSett.touch(exist_ok=True)
+    flSett = open(pthSett, mode="rb+")
+    try:
+        settings.load(flSett)
+    except BadConfigFileError as err:
+        #spinner.stop(_('BAD_SETTINGS_FILE'))
+        logging.error(f"Failed to load config file: {err}")
+        print("Failed to load config file.")
+    else:
+        #spinner.stop(_("SETTINGS_LOADED"))
+        pass
     #
-    vpnHarvesterApp = VpnHarvesterWin()
-    vpnHarvesterApp.mainloop()
+    from widgets.vpn_harvester_win import VpnHarvesterWin
+    vpnHarvesterApp = VpnHarvesterWin(settings=settings)
+    try:
+        vpnHarvesterApp.mainloop()
+        flSett.seek(0)
+        settings.save(flSett)
+    finally:
+        flSett.close()
 
 
 if __name__ == '__main__':
