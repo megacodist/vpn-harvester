@@ -6,8 +6,6 @@ from pathlib import Path
 import sqlite3
 from typing import Dict, Optional, Set
 
-import requests
-
 from . import (IVpnGateableDb, VpnGateServer,parseVpnGateCsv,
     BadColumnsError, VpnConfig, OwnerStat, UserTest)
 
@@ -306,99 +304,103 @@ class VpnGateManager:
     and committing changes to a database.
     """
     def __init__(self, db: IVpnGateableDb):
-        self.db: IVpnGateableDb = db
-        self.mp_name_server: Dict[str, VpnGateServer] = {}
-        self.del_server_names: Set[str] = set()
-        self.upd_server_names: Set[str] = set()
+        self._db: IVpnGateableDb = db
+        self._mpNameServer: Dict[str, VpnGateServer] = {}
+        self._stDelSrvrNames: Set[str] = set()
+        self._stUpdSrvrNames: Set[str] = set()
 
     def reset_servers_from_db(self):
         """
         Clears the current in-memory state and reloads all servers
         from the database.
         """
-        servers = self.db.read_all_servers()
+        servers = self._db.read_all_servers()
         # Empty all in-memory collections
-        self.mp_name_server.clear()
-        self.del_server_names.clear()
-        self.upd_server_names.clear()
+        self._mpNameServer.clear()
+        self._stDelSrvrNames.clear()
+        self._stUpdSrvrNames.clear()
         #
         for server in servers:
-            self.mp_name_server[server.config.name] = server
+            self._mpNameServer[server.config.name] = server
 
-    def read_from_url(self, url: str):
+    def sync_from_csv(self, csv_text: str):
         """
-        Reads a VPN Gate CSV from a URL, parses it, and updates the
-        in-memory collection of servers.
+        Synchronizes the in-memory server list with a new CSV data source.
+        
+        This method will:
+        1. Add new servers not previously seen.
+        2. Update existing servers with new information.
+        3. Mark any servers that are no longer in the CSV for deletion.
         
         Raises:
-            `requests.exceptions.RequestException`:
-                If the URL cannot be fetched.
-            `BadColumnsError`:
-                If the CSV headers do not match expectations.
-            `FormatError`:
-                If the CSV format is invalid.
+            `vpn_gate.BadColumnsError`: If the CSV headers do not match
+                expectations.
+            `FormatError`: If the CSV format is invalid.
         """
-        # Fetching data from URL...
-        response = requests.get(url, timeout=20)
-        response.raise_for_status()  # Raise an exception for bad status codes
-        text = response.text
-        # Parsing CSV data...
-        csv_data = parseVpnGateCsv(text)
-        # Check that the parsed headers match what VpnGateServer expects.
+        # Parse CSV text
+        csv_data = parseVpnGateCsv(csv_text)
         if set(csv_data.header) != VpnGateServer.get_all_headings():
             raise BadColumnsError(
-                "The columns from the URL do not match the expected columns.")
-        #
+                "The columns from the CSV data do not match the expected"
+                " columns.")
+        # Integrate newly-parsed data
+        fresh_server_names = set()
         for row in csv_data.rows:
-            # Create a temporary server object from the new CSV data
             server_from_csv = VpnGateServer.from_csv_row(csv_data.header, row)
             server_name = server_from_csv.config.name
-
-            if server_name in self.mp_name_server:
-                # Server already exists, try to update it
+            fresh_server_names.add(server_name)
+            #
+            if server_name in self._mpNameServer:
+                # Logic for UPDATING an existing server
                 try:
-                    existing_server = self.mp_name_server[server_name]
-                    updated = existing_server.update_with(server_from_csv)
-                    if updated:
-                        # If any part of the server was updated, mark it for saving.
-                        self.upd_server_names.add(server_name)
+                    existing_server = self._mpNameServer[server_name]
+                    if existing_server.update_with(server_from_csv):
+                        self._stUpdSrvrNames.add(server_name)
                 except Exception as e:
                     logging.warning(
                         f"Could not update server '{server_name}': {e}")
-                    continue
             else:
-                # This is a new server, add it to the collection
-                self.mp_name_server[server_name] = server_from_csv
-                # Mark the new server to be inserted into the database.
-                self.upd_server_names.add(server_name)
-                
+                # Logic for ADDING a new server
+                self._mpNameServer[server_name] = server_from_csv
+                self._stUpdSrvrNames.add(server_name)
+        # Cleanup stale servers
+        # Find servers that are in our manager but were not in the new CSV
+        current_server_names = set(self._mpNameServer.keys())
+        stale_server_names = current_server_names - fresh_server_names
+        for name in stale_server_names:
+            # Mark the stale server for deletion
+            self.delete_server(name)
+
     def delete_server(self, server_name: str):
         """
         Marks a server for deletion from the database and removes it
         from the in-memory collection.
         """
         try:
-            del self.mp_name_server[server_name]
-            # If the name was previously marked for update, remove that flag.
-            self.upd_server_names.discard(server_name)
-            # Add it to the set of names to be deleted.
-            self.del_server_names.add(server_name)
-            print(f"Server '{server_name}' marked for deletion.")
+            del self._mpNameServer[server_name]
         except KeyError:
-            logging.warning(f"No such server name was found: {server_name}")
+            logging.warning(
+                f"Attempted to delete non-existent server: {server_name}")
+        else:
+            self._stUpdSrvrNames.discard(server_name)
+            self._stDelSrvrNames.add(server_name)
+            logging.info(f"Server '{server_name}' marked for deletion.")
             
     def save_changes(self):
         """
         Commits all tracked changes (updates, inserts, deletions) to the
         database using the provided database interface.
         """
-        # Upserting all servers that were updated or newly added...
-        for name in self.upd_server_names:
-            server_to_save = self.mp_name_server[name]
-            self.db.upsert_server(server_to_save)        
-        # Deleting all servers marked for deletion...
-        for name in self.del_server_names:
-            self.db.delete_server(name)
-        # Clearing the tracking sets after the changes have been committed...
-        self.upd_server_names.clear()
-        self.del_server_names.clear()
+        logging.info("Saving changes to the database...")
+        for name in self._stUpdSrvrNames:
+            if name in self._mpNameServer:
+                self._db.upsert_server(self._mpNameServer[name])
+        logging.info(f"  - Upserted {len(self._stUpdSrvrNames)} servers.")
+        #
+        for name in self._stDelSrvrNames:
+            self._db.delete_server(name)
+        logging.info(f"  - Deleted {len(self._stDelSrvrNames)} servers.")
+        #
+        self._stUpdSrvrNames.clear()
+        self._stDelSrvrNames.clear()
+        logging.info("Save complete.")

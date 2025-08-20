@@ -20,3 +20,5 @@ class VpnGateAppSettings(AppSettings):
     licw_y = 150
     licw_width = 400
     licw_height = 300
+    #
+    servers_cols_width = [150.0, 80.0, 120.0, 100.0, 80.0, 150.0, 200.0,]

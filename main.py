@@ -2,7 +2,6 @@ import binascii
 import csv
 import base64
 import logging
-import re
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -10,7 +9,7 @@ csv.field_size_limit(10_000_000)
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from utils.vpn_gate import VpnGateCsvData
+from utils.vpn_gate import VpnGateCsvData, IVpnGateableDb
 
 
 # Configuration
@@ -20,36 +19,6 @@ API_CSV_URL: str = 'http://www.vpngate.net/api/iphone/'
 DB_PATH: Path = _APP_DIR / 'ovpns.db'
 OVPNS_DIR: Path = _APP_DIR / 'ovpns'
 OVPNS_DIR.mkdir(exist_ok=True)
-
-
-def slugify(text: str, delim: str = "-") -> str:
-    """
-    Convert a string into a URL-friendly slug by splitting on non-alphanumeric
-    characters and joining parts with a specified delimiter defaults to
-    hyphen.
-
-    Args:
-        s (str): The input string to be slugified.
-        delim (str): The delimiter to use for joining the parts. Defaults
-            to hyphen ('-').
-
-    Returns:
-        str: The slugified string with lowercase alphanumeric parts joined
-        by hyphens.
-
-    Examples:
-        >>> slugify("Hello, World! This is a test.")
-        'hello-world-this-is-a-test'
-        >>> slugify("!Hello World!")
-        'hello-world'
-        >>> slugify("hello_world test-123")
-        'hello-world-test-123'
-        >>> slugify("!!!")
-        ''
-    """
-    parts: list[str] = re.split(r'[\W_]+', text.lower())
-    filtered_parts: list[str] = [part for part in parts if part]
-    return delim.join(filtered_parts)
 
 
 def saveOvpnFiles(dir_: Path, vpnGateData: VpnGateCsvData) -> None:
@@ -110,12 +79,71 @@ def renderHtmlFromCsv(
     print(f'HTML report written to {output_path}')
 
 
+def connectDb(
+        db_path: Path,
+        db_class: type[IVpnGateableDb],
+        ) -> IVpnGateableDb | None:
+    """
+    Attempts to connect to a database file, validates its schema, and
+    returns a DB object.
+
+    Args:
+        `db_path`: The file system path to the database.
+        `db_class`: The class (implementing `IVpnGateableDb`) to use for
+            the connection.
+
+    Returns:
+        An instance of the `db_class` if connection and validation are
+            successful, otherwise `None`.
+    """
+    import sqlite3
+    db = None
+    try:
+        # Attempt to instantiate the database object, which connects
+        # to the file
+        db = db_class(db_path)
+    except (IOError, PermissionError) as err:
+        # Catches file system errors like permission denied
+        logging.error(
+            f"Database path '{db_path}' is inaccessible: {err}",
+            exc_info=True)
+        print(f"Error: Database path '{db_path}' is inaccessible.")
+        return None
+    except sqlite3.DatabaseError as err:
+        # Catches errors where the file is not a valid SQLite database
+        logging.error(
+            (f"File '{db_path}' is not a valid database for "
+                f"{db_class.__name__}: {err}"),
+            exc_info=True)
+        print(f"Error: The file at '{db_path}' is not a valid database.")
+        return None
+    except Exception as err:
+        # Catch any other unexpected errors during initialization
+        logging.critical(
+            f"An unexpected error occurred connecting to '{db_path}': {err}",
+            exc_info=True)
+        print(
+            "An unexpected critical error occurred during database connection.")
+        return None
+    # If the connection was successful, check the database schema
+    if db.check_db():
+        logging.info(f"Successfully connected to and validated database: {db_path}")
+        return db
+    else:
+        logging.error(f"Database at '{db_path}' does not have the necessary tables and columns.")
+        print(f"Error: The database at '{db_path}' does not have the required schema.")
+        db.close()  # Clean up the connection before exiting
+        return None
+
+
 def main() -> None:
-    # Configuring the logger...
+    # Configure the logger
+    print("Configuring the logger...")
     from utils.logger import configureLogger
     configureLogger(_APP_DIR / 'log.log')
-    # Loading application settings...
+    # Load application settings
     #spinner.start(_('LOADING_SETTINGS'))
+    print("Loading settings...")
     from megacodist.settings import BadConfigFileError
     from utils.settings import VpnGateAppSettings
     settings = VpnGateAppSettings(_SECRET_KEY)
@@ -132,8 +160,14 @@ def main() -> None:
         #spinner.stop(_("SETTINGS_LOADED"))
         pass
     #
+    from utils.vpn_gate.manager import VpnGateSqlite as typDb
+    pthDb = _APP_DIR / "ovpns.db"
+    db = connectDb(pthDb, typDb)
+    if db is None:
+        sys.exit(1)
+    #
     from widgets.vpn_harvester_win import VpnHarvesterWin
-    vpnHarvesterApp = VpnHarvesterWin(settings=settings)
+    vpnHarvesterApp = VpnHarvesterWin(settings=settings, db=db)
     try:
         vpnHarvesterApp.mainloop()
         flSett.seek(0)

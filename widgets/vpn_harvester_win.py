@@ -2,30 +2,32 @@
 # 
 #
 
-from dataclasses import dataclass
 import logging
-from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
+from utils import readCsvFile, readCsvUrl
 from utils.settings import VpnGateAppSettings
-
-
-@dataclass
-class VpnGateSettings:
-    openvpn_exe_path: Path = Path(r"C:\Program Files\OpenVPN\bin\openvpn.exe")
-    ovpn_dir: Path = Path("ovpn_files")
+from utils.vpn_gate import IVpnGateableDb
+from utils.vpn_gate.manager import VpnGateManager
+from widgets.servers_view import ServersView
 
 
 class VpnHarvesterWin(tk.Tk):
-    def __init__(self, settings: VpnGateAppSettings) -> None:
+    def __init__(
+            self,
+            settings: VpnGateAppSettings,
+            db: IVpnGateableDb,
+            ) -> None:
         # Creating the window...
         super().__init__()
-        self.title("VPN Gate Connection Tester")
+        self.title("VPN Gate Harvester")
         self.geometry(f"{settings.win_width}x{settings.win_height}+"
             f"{settings.win_x}+{settings.win_y}")
         # Attributes...
         self._settings = settings
+        self._db = db
+        self._vpnMngr = VpnGateManager(self._db)
         # Initializing the GUI...
         self._frm_container = ttk.Frame(self)
         self._frm_container.pack(expand=True, fill='both', padx=5, pady=5)
@@ -85,8 +87,8 @@ class VpnHarvesterWin(tk.Tk):
             label="Load VPN Gate Servers from URL...",
             command=self._loadCsvFromUrl)
         self._menu_tools.add_command(
-            label="Check Selected Server...",
-            command=self._checkServer)
+            label="Test Servers...",
+            command=self._testServers)
     
     def _initToolbar(self):
         self._toolbar = ttk.Frame(
@@ -104,7 +106,7 @@ class VpnHarvesterWin(tk.Tk):
         self._btn_check = ttk.Button(
             self._toolbar,
             text="Check Selected",
-            command=self._checkServer)
+            command=self._testServers)
         self._btn_check.pack(side=tk.LEFT, padx=2, pady=2)
 
     def _initPanes(self):
@@ -153,7 +155,16 @@ class VpnHarvesterWin(tk.Tk):
         self._pndw_mainHorz.add(self._lfrm_msgs, weight=1)
 
     def _initServersVw(self) -> None:
-        pass
+        self._srvrsvw = ServersView(self._lfrm_servers)
+        # Read lastest columns width
+        try:
+            self._srvrsvw.set_column_widths(
+                iter(self._settings.servers_cols_width))
+        except:
+            # In case of any error, fall back to default columns width
+            self._srvrsvw.set_column_widths(
+                iter(VpnGateAppSettings.servers_cols_width))
+        self._srvrsvw.pack(fill='both' ,expand=True)
 
     def _initStatsVw(self) -> None:
         pass
@@ -170,7 +181,7 @@ class VpnHarvesterWin(tk.Tk):
     def _loadCsvFromUrl(self) -> None:
         pass
 
-    def _checkServer(self) -> None:
+    def _testServers(self) -> None:
         pass
 
     def _saveGeometry(self) -> None:
@@ -203,4 +214,5 @@ class VpnHarvesterWin(tk.Tk):
         self._settings.pndw_left_vert = self._pndw_leftVert.sashpos(0)
         self._settings.pndw_btm_left_horz = self._pndw_btmLeftHorz.sashpos(0)
         #
+        self._settings.servers_cols_width = self._srvrsvw.get_column_widths()
         self.destroy()
